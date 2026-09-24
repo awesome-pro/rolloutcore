@@ -257,6 +257,14 @@ def vllm_version() -> str:
         return "unknown"
 
 
+def _safe_weight_info() -> str:
+    """The engine label, or a note if it cannot answer -- it may be blocked."""
+    try:
+        return weight_info()
+    except Exception as exc:
+        return f"unavailable: {type(exc).__name__}"
+
+
 def record(checks: dict[str, bool], name: str, ok: Any) -> None:
     checks[name] = bool(ok)
     print(f"  [{'PASS' if bool(ok) else 'FAIL'}] {name}")
@@ -313,18 +321,25 @@ class StateTimeline:
 
 
 def build_engine(
-    train_model: Any, model: str
+    train_model: Any, model: str, *, packed_buffer_bytes: int | None = None
 ) -> tuple[Any, HttpVLLMAdapter, LifecycleController, LifecycleRunner]:
     group_size = world_size() + 1  # every inference worker, plus this trainer
+    init_info: dict[str, Any] = {
+        "master_address": get_ip(),
+        "master_port": get_open_port(),
+        "world_size": group_size,
+        "rank": 0,  # single-GPU trainer is the sole sender
+        "packed": True,
+    }
+    if packed_buffer_bytes is not None:
+        # An 8B checkpoint's embedding matrix is 1.24GB and vLLM's default buffer is
+        # 1GiB (packed_tensor.py:15). Both sides chunk with the same rule, so they
+        # *should* agree -- but a divergence deadlocks an NCCL collective instead of
+        # erroring, so this is a hypothesis to test cheaply, not debug in place.
+        init_info["packed_buffer_size_bytes"] = packed_buffer_bytes
     driver = NCCLWeightTransferDriver(
         base_url=BASE_URL,
-        trainer_init_info=NCCLTrainerInitInfo(
-            master_address=get_ip(),
-            master_port=get_open_port(),
-            world_size=group_size,
-            rank=0,  # single-GPU trainer is the sole sender
-            packed=True,
-        ),
+        trainer_init_info=NCCLTrainerInitInfo(**init_info),
         source=ModuleSource(train_model),
         world_size=group_size,
     )
@@ -343,10 +358,29 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default="Qwen/Qwen3-8B", help="the checkpoint both sides use")
     ap.add_argument("--skip-deep-kill", action="store_true")
+    ap.add_argument(
+        "--packed-buffer-gib",
+        type=float,
+        default=None,
+        help="override NCCLTrainerInitInfo.packed_buffer_size_bytes (default 1GiB)",
+    )
+    ap.add_argument(
+        "--transfer-budget",
+        type=float,
+        default=180.0,
+        help="seconds to wait for one hot update before declaring a hang",
+    )
     args = ap.parse_args()
     model = args.model
+    packed_bytes = None if args.packed_buffer_gib is None else int(args.packed_buffer_gib * 1024**3)
 
     report: dict[str, Any] = {"phase": "6", "model": model, "ok": False}
+    report["flags"] = {
+        "model": model,
+        "packed_buffer_bytes": packed_bytes,
+        "transfer_budget_seconds": args.transfer_budget,
+        "drain_interval_seconds": DRAIN_INTERVAL_S,
+    }
     sha, dirty = git_revision()
     report["started_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     report["rolloutcore_sha"] = sha
@@ -375,7 +409,9 @@ def main() -> int:
         train_model = AutoModelForCausalLM.from_pretrained(model, dtype=torch.bfloat16)
         train_model.to(f"cuda:{TRAINER_DEVICE_INDEX}")
 
-        driver, _adapter, ctrl, runner = build_engine(train_model, model)
+        driver, _adapter, ctrl, runner = build_engine(
+            train_model, model, packed_buffer_bytes=packed_bytes
+        )
         identity = driver.identity()
         print("[cycle] bootstrap")
         runner.bootstrap()
@@ -385,11 +421,48 @@ def main() -> int:
         # ============================ L1: the hot path
         print("\n--- L1: hot update, decomposed ---")
         timeline = StateTimeline(ctrl)
+        cycle_outcome: dict[str, Any] = {}
+
+        def do_hot_cycle() -> None:
+            try:
+                cycle_outcome["result"] = runner.run_cycle(ctrl.next_target(identity))
+            except BaseException as exc:
+                cycle_outcome["error"] = f"{type(exc).__name__}: {exc}"
+
         timeline.start()
         hot_started = time.monotonic()
-        result = runner.run_cycle(ctrl.next_target(identity))
+        # On a daemon thread with a budget. A divergent packed stream deadlocks the
+        # NCCL collective instead of erroring, and the broadcast runs concurrently
+        # with the HTTP calls -- so the client's 300s timeout (clients.py:66) is on
+        # the requests, not on the collective, and nothing else bounds it.
+        cycle_thread = threading.Thread(target=do_hot_cycle, name="hot-cycle", daemon=True)
+        cycle_thread.start()
+        cycle_thread.join(timeout=args.transfer_budget)
+        if cycle_thread.is_alive():
+            hung = True
+            timeline.stop()
+            detail["hot_hang"] = {
+                "seconds_waited": round(time.monotonic() - hot_started, 4),
+                "budget_seconds": args.transfer_budget,
+                "states": timeline.durations(),
+                "engine_label": _safe_weight_info(),
+                "verdict": (
+                    "the update never returned: a packed-stream divergence deadlocks "
+                    "the collective rather than raising. Nothing published, engine "
+                    "left paused."
+                ),
+            }
+            print(f"[hot] HUNG for {args.transfer_budget}s; states: {detail['hot_hang']['states']}")
+            record(checks, "hot_path_did_not_hang", False)
+            _write(report, detail, checks)
+            print("[exit] os._exit to bound the cost of a blocked collective")
+            sys.stdout.flush()
+            os._exit(3)
         hot_seconds = round(time.monotonic() - hot_started, 4)
         events = timeline.stop()
+        if cycle_outcome.get("error"):
+            raise RuntimeError(f"hot update failed: {cycle_outcome['error']}")
+        result = cycle_outcome["result"]
         after = generate(model)
         states = timeline.durations()
         update_seconds = float(states.get(LifecycleState.UPDATING.value, 0.0))
@@ -444,7 +517,9 @@ def main() -> int:
         if not args.skip_deep_kill:
             print("\n--- L3: SIGKILL inside the collective ---")
             server = lifetime("l3-deep-kill", dummy=True)
-            _d3, _a3, ctrl3, runner3 = build_engine(train_model, model)
+            _d3, _a3, ctrl3, runner3 = build_engine(
+                train_model, model, packed_buffer_bytes=packed_bytes
+            )
             runner3.bootstrap()
             identity3 = _d3.identity()
             outcome: dict[str, Any] = {}
