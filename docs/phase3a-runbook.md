@@ -29,8 +29,8 @@ sequence — all eleven checks, the JSON artifact, and the failure paths — wit
 GPU and no vLLM:
 
 ```bash
-PYTHONPATH=src:tests python tests/fake_dev_server.py --port 8123 &
-python scripts/live_control_plane_smoke.py --base-url http://127.0.0.1:8123 \
+PYTHONPATH=src:tests python3 tests/fake_dev_server.py --port 8123 &
+python3 scripts/live_control_plane_smoke.py --base-url http://127.0.0.1:8123 \
     --model facebook/opt-125m --json-out /tmp/phase3a-stub.json
 # expect: checks: N passed … RESULT: PASS, exit 0
 kill %1
@@ -57,20 +57,43 @@ git push origin main
 | Setting | Value | Why |
 |---|---|---|
 | GPUs | **1×** RTX 4090 / L40S / A6000 / A100 (≥16 GB) | `opt-125m` needs ~1 GB; the harness is not compute-bound |
-| Image | PyTorch 2.4+ / **CUDA 12.4+** devel-capable | vLLM needs a matching driver; a `-devel` image is only needed if you build from source |
+| Image | **`vllm/vllm-openai:<tag>`** if your provider allows a custom image (then skip step 3 entirely), else any CUDA 12.9/13.0 image | vLLM + torch + CUDA arrive pre-matched; a `-devel` image is only needed for a source build |
 | Disk | ≥ 40 GB | model + torch + vLLM |
 | Volume | mount a persistent volume at `/workspace` and set `HF_HOME=/workspace/hf` | avoids re-downloading the model after a restart |
 | Expose | nothing | everything runs inside the pod over `127.0.0.1` |
 
+### What the pinned commit actually requires
+
+Read from the audit checkout (`vendor/vllm-main` @ `00b7847c`), not guessed:
+
+| Requirement | Value | Source |
+|---|---|---|
+| PyTorch | **2.13.0** (exact pin) | `requirements/cuda.txt:7` |
+| CUDA wheel variants | **`cu129`** (default) and **`cu130`** | `setup.py:604` (`supported = {12: "cu129", 13: "cu130"}`) |
+| Default CUDA for a source build | `VLLM_MAIN_CUDA_VERSION = "13.0"` | `vllm/envs.py:91` |
+| Driver for `cu130` | **R580 or newer** (CUDA 13 minimum); `cu129` runs on far older drivers | `docs/getting_started/installation/gpu.cuda.inc.md:327` |
+| Python | `>=3.10,<3.15` | `pyproject.toml:35` |
+| Blackwell (B200/GB200) | needs ≥ CUDA 12.8 | `gpu.cuda.inc.md:39` |
+
+So: **do not pick a torch version yourself** — vLLM pins it, and picking your own
+is how these runs die. Pick the *variant* from the driver, which is what
+`uv ... --torch-backend=auto` does for you.
+
+An older "PyTorch 2.4 / CUDA 12.4" template (which this runbook previously
+recommended) is ~9 torch minors and 9 CUDA minors behind this commit and will
+not work.
+
 Verify the driver before doing anything else:
 
 ```bash
-nvidia-smi                       # driver + CUDA version, GPU visible
-python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+nvidia-smi          # note the "CUDA Version:" field = the max CUDA this driver supports
 ```
 
-**Checkpoint CP1 — proceed only if** `torch.cuda.is_available()` is `True` and
-`nvidia-smi` names the GPU. Record `nvidia-smi` output; it goes into the report.
+- says **13.0+** → `cu130` wheels, or just let auto-detection decide
+- says **12.x** → `cu129` wheels (`--torch-backend=cu129` / `VLLM_PRECOMPILED_WHEEL_VARIANT=cu129`)
+
+**Checkpoint CP1 — proceed only if** `nvidia-smi` names the GPU. Record its
+output; it goes into the report.
 
 ---
 
@@ -81,9 +104,12 @@ cd /workspace
 git clone https://github.com/<you>/rolloutcore.git && cd rolloutcore
 # or, from the Mac:
 #   rsync -av --exclude .venv --exclude .git ~/Desktop/rolloutcore/ pod:/workspace/rolloutcore/
-python -V                        # >= 3.11
+python3 -V                        # >= 3.11
 git rev-parse HEAD               # this SHA is recorded in the artifact
 ```
+
+RolloutCore itself needs **nothing installed** — the harness is pure stdlib and
+bootstraps `src/` onto `sys.path` by itself. Only vLLM needs installing.
 
 ---
 
@@ -91,42 +117,66 @@ git rev-parse HEAD               # this SHA is recorded in the artifact
 
 Target: `00b7847c8036b667742b4efb21aab1de51fd4721`.
 
+**Option 0 — you used the `vllm/vllm-openai` image:** nothing to install. Verify
+and skip to step 4:
+
+```bash
+vllm --version && nvidia-smi
+```
+
+Otherwise, in a venv:
+
 ```bash
 cd /workspace
-python -m venv .venv && source .venv/bin/activate
-pip install -U pip wheel
+python3 -m venv .venv && source .venv/bin/activate
+pip install -U pip && pip install uv        # uv is the supported installer here
 ```
 
-Pick **one** of these, in order of preference:
-
-**A. A wheel that is already built from that commit** (fastest, if it exists):
+**Option A (recommended) — the prebuilt wheel for that exact commit.** vLLM
+publishes a wheel per commit since v0.5.3:
 
 ```bash
-pip install "vllm==<version>" --extra-index-url https://wheels.vllm.ai/nightly
-python -c "import vllm; print(vllm.__version__)"   # dev builds embed the commit
+export VLLM_COMMIT=00b7847c8036b667742b4efb21aab1de51fd4721
+uv pip install vllm --torch-backend=auto \
+    --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
 ```
 
-**B. Source at the pinned commit** (20–40 min; needs the CUDA toolchain):
+`--torch-backend=auto` reads the driver and picks `cu129`/`cu130` for you. If it
+guesses wrong, name the variant explicitly:
+
+```bash
+uv pip install vllm --torch-backend=cu130 \
+    --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cu130
+```
+
+`pip` is **not** supported against vLLM's nightly/commit indices (it merges
+indexes and takes the newest version, so you silently get a different build). If
+you insist on `pip`, install the wheel URL directly — see
+`gpu.cuda.inc.md:67-72`.
+
+**Option B — source at the pinned commit** (20–40 min, CUDA toolchain required;
+use only if Option A fails):
 
 ```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm && git fetch --depth=1 origin 00b7847c8036b667742b4efb21aab1de51fd4721
 git checkout 00b7847c8036b667742b4efb21aab1de51fd4721
-pip install -e .            # add VLLM_USE_PRECOMPILED=1 to reuse prebuilt kernels
+VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
 ```
 
-**C. Latest release** (2 min) — acceptable, but then the artifact's
-`vllm_sha_matches_report` check records a **warning**, and you must paste that
-warning back with the results:
+**Option C — latest release** (2 min) — acceptable, but the artifact's
+`vllm_sha_matches_report` check then records a **warning**, and you must paste
+that warning back with the results:
 
 ```bash
-pip install vllm
+uv pip install vllm --torch-backend=auto
 ```
 
-Then confirm the dev endpoints exist at all (this is the whole point of the pin):
+Then confirm both the version and that the dev endpoints exist at all:
 
 ```bash
-python -c "import vllm, vllm.entrypoints.serve.dev.rlhf.api_router as r; print(vllm.__version__); print(r.router.routes and 'dev rlhf router OK')"
+python3 -c "import vllm; print(vllm.__version__)"   # dev builds embed the commit
+python3 -c "import vllm.entrypoints.serve.dev.rlhf.api_router as r; print('dev rlhf router OK', len(r.router.routes))"
 ```
 
 **Checkpoint CP2 — proceed only if** `vllm` imports and `vllm serve --help`
@@ -139,14 +189,15 @@ mix versions.
 
 ```bash
 export HF_HOME=/workspace/hf
-huggingface-cli download facebook/opt-125m    # ~250 MB, matches vLLM's own RL example
+hf download facebook/opt-125m          # ~250 MB, matches vLLM's own RL example
+# older CLIs: huggingface-cli download facebook/opt-125m
 ```
 
 `opt-125m` is deliberate: it is what vLLM's `examples/rl/rlhf_http_nccl.py` uses,
 so Phase 3B reuses the same model and removes model-specific unknowns. Qwen is a
 later swap, not a Phase 3A concern.
 
-**Checkpoint CP3.** `python -c "from transformers import AutoConfig;
+**Checkpoint CP3.** `python3 -c "from transformers import AutoConfig;
 print(AutoConfig.from_pretrained('facebook/opt-125m').model_type)"` → `opt`.
 
 ---
@@ -197,7 +248,7 @@ Attach mode (server already running):
 
 ```bash
 cd /workspace/rolloutcore
-python scripts/live_control_plane_smoke.py \
+python3 scripts/live_control_plane_smoke.py \
     --base-url http://127.0.0.1:8000 \
     --model facebook/opt-125m \
     --vllm-sha 00b7847c8036b667742b4efb21aab1de51fd4721 \
@@ -209,7 +260,7 @@ Launch mode (one command, no second shell):
 
 ```bash
 cd /workspace/rolloutcore
-python scripts/live_control_plane_smoke.py \
+python3 scripts/live_control_plane_smoke.py \
     --launch --model facebook/opt-125m \
     --vllm-sha 00b7847c8036b667742b4efb21aab1de51fd4721 \
     --identity-source manifest
@@ -261,7 +312,7 @@ audited commit; record it and continue, but say so.
 cd /workspace/rolloutcore
 cat results/phase3a.json                     # paste this back verbatim
 nvidia-smi > results/gpu.txt
-python -c "import vllm; print(vllm.__version__, vllm.__file__)" | tee results/vllm-version.txt
+python3 -c "import vllm; print(vllm.__version__, vllm.__file__)" | tee results/vllm-version.txt
 pip freeze | grep -Ei "vllm|torch|transformers|flashinfer" | tee results/pip.txt
 tar czf /workspace/phase3a-results.tgz results/
 ```
@@ -317,6 +368,10 @@ actually showed.
 | CUDA OOM at startup | `--max-model-len`/`--gpu-memory-utilization` too high for the pod | lower both; 512 / 0.6 is already conservative |
 | `connection refused` on `/health` | server still loading or crashed | the launcher waits up to 900 s and prints the log tail on failure |
 | `environment` warns | vLLM is not the audited commit | record it in the report; do not hide it |
+| `CUDA driver version is insufficient for CUDA runtime version` | the wheel is `cu130` but the driver is older than R580 (`gpu.cuda.inc.md:327`) | reinstall with `--torch-backend=cu129`, or move to a pod whose driver is R580+ |
+| torch ended up at the wrong version | it was installed by hand, or by `pip` against a nightly index | never pin torch yourself: it is pinned at `2.13.0` by `requirements/cuda.txt:7`. Reinstall with `uv` (step 3) |
+| an old image ships PyTorch 2.4 / CUDA 12.4 | stale template, ~9 minors behind this commit | use `vllm/vllm-openai`, or install vLLM per step 3; the template's torch does not matter once `uv --torch-backend=auto` runs |
+| `No module named 'vllm.entrypoints.serve.dev'` | a vLLM older than the dev-route layout | pin to Option A/B; this layout is what the audit was done against |
 
 ## What Phase 3A does *not* prove
 

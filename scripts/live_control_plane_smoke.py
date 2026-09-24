@@ -45,7 +45,7 @@ Usage
 
 Launch and drive a server in one shot (the turnkey path on a GPU box)::
 
-    python scripts/live_control_plane_smoke.py \\
+    python3 scripts/live_control_plane_smoke.py \\
         --launch --model facebook/opt-125m \\
         --vllm-sha 00b7847c8036b667742b4efb21aab1de51fd4721
 
@@ -53,12 +53,12 @@ Attach to a server you started yourself::
 
     VLLM_SERVER_DEV_MODE=1 VLLM_ENABLE_V1_MULTIPROCESSING=1 \\
       vllm serve facebook/opt-125m --enforce-eager --port 8000 &
-    python scripts/live_control_plane_smoke.py --base-url http://127.0.0.1:8000
+    python3 scripts/live_control_plane_smoke.py --base-url http://127.0.0.1:8000
 
 Dry-run the whole harness with no GPU and no vLLM, against the in-repo stub::
 
-    PYTHONPATH=src:tests python tests/fake_dev_server.py --port 8123 &
-    python scripts/live_control_plane_smoke.py --base-url http://127.0.0.1:8123
+    PYTHONPATH=src:tests python3 tests/fake_dev_server.py --port 8123 &
+    python3 scripts/live_control_plane_smoke.py --base-url http://127.0.0.1:8123
 
 Exit code 0 means every check passed.
 """
@@ -533,7 +533,7 @@ class Smoke:
             "gpu": gpu_info(),
             "host": platform.node(),
             "platform": platform.platform(),
-            "python": sys.version.split()[0],
+            "python3": sys.version.split()[0],
             "identity_source": self.cfg.identity_source,
             "bootstrap_weight_identity": self.adapter.weight_identity.describe()
             if self.adapter.weight_identity

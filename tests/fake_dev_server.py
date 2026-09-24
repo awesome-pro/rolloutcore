@@ -25,7 +25,7 @@ It models only the behaviours Phase 3A depends on, and models them faithfully:
 
 Run it standalone::
 
-    PYTHONPATH=src:tests python tests/fake_dev_server.py --port 8123
+    PYTHONPATH=src:tests python3 tests/fake_dev_server.py --port 8123
 """
 
 from __future__ import annotations

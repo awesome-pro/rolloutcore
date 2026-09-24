@@ -27,25 +27,25 @@ weight source that produced it.
 ```bash
 ./scripts/test.sh          # tests + ruff + mypy
 ./scripts/test.sh --fast   # tests only
-python -m rolloutcore.demo # full cycle, fake engine, no GPU
+python3 -m rolloutcore.demo # full cycle, fake engine, no GPU
 
 # Re-derive every file:LINE claim in the docs against a vLLM checkout:
 VLLM_CHECKOUT=/path/to/vllm ./scripts/test.sh
-python scripts/verify_anchors.py --vllm /path/to/vllm
+python3 scripts/verify_anchors.py --vllm /path/to/vllm
 
 # Phase 3A harness, rehearsed with no GPU against the in-repo stub server:
-PYTHONPATH=src:tests python tests/fake_dev_server.py --port 8123 &
-python scripts/live_control_plane_smoke.py --base-url http://127.0.0.1:8123 \
+PYTHONPATH=src:tests python3 tests/fake_dev_server.py --port 8123 &
+python3 scripts/live_control_plane_smoke.py --base-url http://127.0.0.1:8123 \
     --model facebook/opt-125m --json-out /tmp/phase3a-stub.json
 
 # Phase 3A for real (on a GPU pod, vLLM >= the audited commit):
-python scripts/live_control_plane_smoke.py --launch --model facebook/opt-125m
+python3 scripts/live_control_plane_smoke.py --launch --model facebook/opt-125m
 ```
 
 Pure stdlib on Python ≥ 3.11 — nothing to install. `scripts/test.sh` picks up
 `.venv` if present, and degrades gracefully when pytest/ruff/mypy are absent.
 
-```python
+```python3
 from rolloutcore import LifecycleController, LifecycleRunner
 from rolloutcore.adapters import FakeVLLMAdapter, FakeVLLMEngine, manifest_identity
 
@@ -118,7 +118,7 @@ real GitHub tip, not a local fork:
 The sibling checkout `vendor/vllm` is a stale fork (`d90f0eade5`) and was not
 used. The worktree is a shallow clone (depth 1), so **"NOT PRESENT" means absent
 at this commit, not never existed**. `scripts/verify_anchors.py` re-derives every
-backticked `file.py:LINE` claim from the checkout: **405 anchors resolve to real
+backticked `file.py:LINE` claim from the checkout: **407 anchors resolve to real
 files with in-range line numbers, 0 unresolved** (134 of them via a basename that
 appears in several directories, so the line was checked against each candidate).
 
