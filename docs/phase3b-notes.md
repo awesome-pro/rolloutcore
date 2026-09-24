@@ -1,4 +1,4 @@
-# Phase 3B notes — the target-aware weight-sync client
+# Phase 3B notes: the target-aware weight-sync client
 
 **Status: implemented.** `NCCLWeightTransferDriver` and
 `RolloutCoreWeightSyncClient` live in `src/rolloutcore/adapters/nccl.py`, with 20
@@ -15,8 +15,8 @@ a 2× RTX 3090.
 vLLM's trainer-side NCCL engine drives the whole update round trip, and it calls
 `finish_weight_update` **without a version**:
 
-- `vllm/distributed/weight_transfer/nccl_engine.py:361` — `self.client.finish_weight_update()`
-- `vllm/distributed/weight_transfer/clients.py:89` — the client *does* accept one:
+- `vllm/distributed/weight_transfer/nccl_engine.py:361`: `self.client.finish_weight_update()`
+- `vllm/distributed/weight_transfer/clients.py:89`: the client *does* accept one:
   `def finish_weight_update(self, weight_version: str | None = None)`, and posts
   `{"weight_version": ...}` only when it is not `None`.
 
@@ -92,8 +92,8 @@ controller: confirm_updated(evidence) -> INVALIDATING -> VALIDATING
    A mismatch must fail with no request sent, which is why
    `WeightTransferNotConfiguredError` is a `RolloutCoreError`: the runner's effect
    wrapper re-raises it without tainting, because nothing happened yet.
-   (`WeightProvenance`, not `WeightSource`, precisely because the latter is
-   upstream's type — see `docs/state-machine.md` §5.)
+   (`WeightProvenance`, not `WeightSource`, because the latter is
+   upstream's type; see `docs/state-machine.md` §5.)
 
 2. **`chunks_transferred` stays `None`** unless upstream exposes a trustworthy
    count. `NCCLTrainerWeightTransferEngine.send_weights()` does not, so the

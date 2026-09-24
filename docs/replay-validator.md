@@ -19,9 +19,9 @@ python3 scripts/validate_replay.py --trajectories <jsonl> --replays <jsonl>
 
 RolloutCore binds every rollout to a declared weight source: a version label and
 a `WeightIdentity` carrying provenance (`checkpoint`/`run_id`/`step`). That binding
-is a *claim about provenance*. Nothing in the engine enforces it — PR #49040
-deliberately removed per-request version binding, because one request may span two
-versions — so the only way to test the claim is to reproduce the rollout and look.
+is a *claim about provenance*. Nothing in the engine enforces it, because PR #49040
+removed per-request version binding (one request may span two versions), so the
+only way to test the claim is to reproduce the rollout and look.
 
 The asymmetry is the point:
 
@@ -29,9 +29,9 @@ The asymmetry is the point:
 > **Agreement only fails to falsify it.**
 
 Nothing here proves that a checkpoint on disk is the checkpoint that ran. That
-would need a content hash of the tensors, which `WeightIdentity` explicitly does
-not do — it hashes names, dtypes and shapes (`src/rolloutcore/trajectory.py:159-163`
-records why a manifest-only identity cannot even support the claim).
+would need a content hash of the tensors, which `WeightIdentity` does not do: it
+hashes names, dtypes and shapes (`src/rolloutcore/trajectory.py:159-163` records
+why a manifest-only identity cannot even support the claim).
 
 ## 2. Two modes, and a mismatch means different things in each
 
@@ -39,7 +39,7 @@ This distinction is not cosmetic. Reading one mode's mismatch as the other's tur
 a broken request into a false accusation against the weights, or hides a real
 one.
 
-| | `tokens_were_forced: true` — **trace-forced** | `tokens_were_forced: false` — **greedy** |
+| | `tokens_were_forced: true`: **trace-forced** | `tokens_were_forced: false`: **greedy** |
 |---|---|---|
 | How the ids are used | handed to the engine as a script | an expectation the weights must reproduce |
 | What a token mismatch means | a fault in the replay (misconfigured request, diverged loop) | **the finding**: the weights did not reproduce their own argmax |
@@ -71,37 +71,37 @@ hand-written file can annotate itself:
  "tokens_were_forced": true}
 ```
 
-* `version` — what `GET /weight_info` reports **at replay time**, not at rollout time.
-* `logprobs` — optional; `choices[0].logprobs.token_logprobs` from the completion
+* `version`: what `GET /weight_info` reports **at replay time**, not at rollout time.
+* `logprobs`: optional; `choices[0].logprobs.token_logprobs` from the completion
   response (`entrypoints/openai/completion/protocol.py:625`). `null` entries must be
   removed rather than dropped silently: a short tuple changes which positions the
   logprob lane covers, so the loader refuses `null` outright.
-* `identity_digest` and `prompt` — optional. Absent means *unknown*, not *matching*:
+* `identity_digest` and `prompt`: optional. Absent means *unknown*, not *matching*:
   the validator only checks them when they are supplied.
 
 ## 4. The logprob lane
 
 Token comparison catches a different argmax. It does not catch a distribution that
-has drifted while the argmax held — which is precisely the early stage of a
-weights mismatch, and invisible in the tokens alone. When both sides carry
-logprobs covering every compared position, the validator reports:
+has drifted while the argmax held, which is the early stage of a weights mismatch
+and invisible in the tokens alone. When both sides carry logprobs covering every
+compared position, the validator reports:
 
 | figure | meaning |
 |---|---|
 | `mean_abs_delta` | `mean abs(recorded[i] - observed[i])` |
 | `max_abs_delta` | the worst position |
-| `p99_abs_delta` | **nearest-rank**, `sorted[ceil(0.99n)-1]` — no interpolation, so the figure is always one of the measured deltas |
+| `p99_abs_delta` | **nearest-rank**, `sorted[ceil(0.99n)-1]`; no interpolation, so the figure is always one of the measured deltas |
 | `worst_index` | argmax, first occurrence |
 
 The default tolerance is `1e-3` (`src/rolloutcore/replay.py:58`). It is not a
 precision claim: bf16 kernels are not bit-reproducible across batch shapes, and
-`VLLM_BATCH_INVARIANT=1` — which needs SM90 or newer
-(`examples/rl/rlhf_async_new_apis.py:177`) — is the only way to make an exact
+`VLLM_BATCH_INVARIANT=1`, which needs SM90 or newer
+(`examples/rl/rlhf_async_new_apis.py:177`), is the only way to make an exact
 comparison meaningful. Below the tolerance the deltas are noise.
 
 ## 5. Producing replays on the GPU side
 
-### Option 1 — in-process, trace-forced (the strong mode)
+### Option 1: in-process, trace-forced (the strong mode)
 
 vLLM can be told exactly which ids to emit. `trace_decode_token_ids`
 (`sampling_params.py:374`) "forces the engine to emit this predetermined sequence
@@ -129,7 +129,7 @@ reference to `trace_decode_token_ids`, so `POST /v1/completions` cannot force a
 sequence; the flag is engine-level only. That is a finding in its own right, and
 it is why option 2 exists.
 
-### Option 2 — over HTTP, greedy (the weaker mode)
+### Option 2: over HTTP, greedy (the weaker mode)
 
 Re-request with `temperature=0`, `logprobs=1`, and the recorded text appended to
 the prompt. Only the continuation is compared, and nothing is forced, so a
@@ -138,7 +138,7 @@ mismatch is the finding. Leave `tokens_were_forced` at its default `false`.
 ## 6. Worked example: the committed Phase 5 record
 
 `results/phase5-trajectories.jsonl` holds two declared-source records with **no
-logprobs** — the Phase 5 harness asked only for `return_token_ids`. So the
+logprobs**, because the Phase 5 harness asked only for `return_token_ids`. So the
 committed artifact exercises the **token lane only**, and the logprob lane has
 never been run against a real engine. Say so when quoting a number from it.
 
@@ -181,8 +181,8 @@ FAIL: 1 problem(s): R2: disagrees
 Both summaries above are copied from real runs, not paraphrased.
 
 To see the logprob lane and the `echo:` violation end to end, hand-write a
-two-line pair with logprobs and `"tokens_were_forced": true` — no engine required,
-which is exactly why the validator is a pure function.
+two-line pair with logprobs and `"tokens_were_forced": true`; no engine is
+required, which is why the validator is a pure function.
 
 ## 7. What it does not prove
 

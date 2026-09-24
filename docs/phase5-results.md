@@ -1,8 +1,8 @@
-# Phase 5 results — trajectories that name the training step
+# Phase 5 results: trajectories that name the training step
 
-**Result: PASS. 16/16 checks — with one field in the committed artifact known to
-be wrong, corrected in the harness and documented below rather than edited out of
-the measurement.** Roadmap item 5, on real hardware: a trajectory carries the
+**Result: PASS. 16/16 checks. One field in the committed artifact is known to be
+wrong; it is corrected in the harness and documented below rather than edited out
+of the measurement.** Roadmap item 5, on real hardware: a trajectory carries the
 version it was **admitted** to *and* a declared provenance, which together
 separate two checkpoints that the manifest digest cannot.
 
@@ -21,10 +21,10 @@ separate two checkpoints that the manifest digest cannot.
 
 Two earlier phases measured the same thing from different angles:
 
-- **Phase 3C** — a dummy-initialised `opt-125m` and the real one share the
+- **Phase 3C**: a dummy-initialised `opt-125m` and the real one share the
   manifest digest `925369d663bc`. The digest covers parameter *names, dtypes and
   shapes*, so it identifies an architecture, not a training step.
-- **Phase 4C** — a checkpoint with its first decoder layer negated shares that
+- **Phase 4C**: a checkpoint with its first decoder layer negated shares that
   digest too. The blind spot survives a corrupted checkpoint, which is the case
   that would actually hurt: a bad update would look identical to a good one.
 - **PR #49040** made the other half structural: it added the `weight_version`
@@ -34,7 +34,7 @@ Two earlier phases measured the same thing from different angles:
   engine.
 
 `rolloutcore.trajectory` is that record, and the enabling piece on the trainer
-side is `NCCLWeightTransferDriver.declare` — a driver whose cached identity cannot
+side is `NCCLWeightTransferDriver.declare`: a driver whose cached identity cannot
 follow weights that changed has no way to *re*-declare what it is about to
 install.
 
@@ -63,17 +63,17 @@ Three rows are the result:
    `925369d663bc` under both is not a defect in the record; it is why provenance
    exists. `c8c0aafd93a5` vs `f7a652cf4d70` is the difference a step number makes.
 2. **The binding, not the engine's last word, is what the record keeps.** After
-   the cycle the engine reports `rc-1` — and that label is not evidence about
-   `R-long`, whose tokens were produced entirely at `rc-0`. A record built from
-   the engine's post-hoc label would attribute them to the wrong step.
+   the cycle the engine reports `rc-1`; that label is not evidence about `R-long`,
+   whose tokens were produced entirely at `rc-0`. A record built from the engine's
+   post-hoc label would attribute them to the wrong step.
 3. **The tokens corroborate the binding.** All 256 token ids are `0` (`<s>`),
    which is what dummy-initialised weights produce, while `R2`'s are real text.
    The check `inflight_text_is_the_step_0_weights` asserts exactly that.
 
 Both records are `replay_ready`, both survive a
 `TrajectoryRecorder.write_jsonl`/`read_jsonl` round trip, and the summary is
-`2 trajectories over ['rc-0', 'rc-1']; 2 replay-ready, 0 manifest-only` — the
-blind spot from 3C and 4C closed, for records that declare a source.
+`2 trajectories over ['rc-0', 'rc-1']; 2 replay-ready, 0 manifest-only`: the blind
+spot from 3C and 4C closed, for records that declare a source.
 
 ## A defect in this artifact, corrected in the harness
 
@@ -109,14 +109,14 @@ identity and the tokens; the field in question is not part of that comparison.
 Nothing in this run verifies a single weight byte. `exactness == "declared-source"`
 says the *caller* stated `checkpoint`, `run_id` and `step`; `replay_ready` says the
 record **can support** a replay claim, not that one has been made. What the
-identity buys is that two versions can no longer collide — the failure Phase 3C
-found — and what it does not buy is proof that step 1's bytes are the ones on the
+identity buys is that two versions can no longer collide (the failure Phase 3C
+found), and what it does not buy is proof that step 1's bytes are the ones on the
 card.
 
 The design's answer to that is the replay validator (item 8): a trajectory carries
 the prompt *and* the token ids precisely so the generation can be re-run on the
 same declared source and compared. That is the mechanism that converts "declared"
-into evidence — in one direction only, as `docs/replay-validator.md` says.
+into evidence, in one direction only, as `docs/replay-validator.md` says.
 
 ## What Phase 5 does *not* prove
 
@@ -133,7 +133,7 @@ into evidence — in one direction only, as `docs/replay-validator.md` says.
 - **`opt-125m`, one node, TP=1.**
 - **`finish_reason` is `length` for both**, so neither record has a natural stop
   to check against.
-- **The artifact's completion label is wrong** (previous section) — every other
+- **The artifact's completion label is wrong** (previous section): every other
   field in it is as measured.
 
 ## Reproduce

@@ -343,7 +343,7 @@ def replay_path() -> None:
     try:
         ReplayPlan.from_trajectory(manifest_only)
     except ReplayError as exc:
-        print(f"  manifest-only     : refused — {exc}")
+        print(f"  manifest-only     : refused: {exc}")
     else:  # pragma: no cover - the refusal is the point
         raise AssertionError("a manifest-only record must not be replayable")
 
@@ -357,7 +357,7 @@ def replay_path() -> None:
 
 def main() -> int:
     print("=" * W)
-    print("RolloutCore — lifecycle demo (fake engine, no GPU)".center(W))
+    print("RolloutCore: lifecycle demo (fake engine, no GPU)".center(W))
     print("=" * W)
     happy_path()
     drain_disagreement_path()

@@ -1,4 +1,4 @@
-# Phase 4D results — the engine dies mid-update
+# Phase 4D results: the engine dies mid-update
 
 **Result: PASS. 8/8 checks.** Phase 4B killed the engine *before* a cycle; this
 kills it *inside* one, at the first instant the controller reports `UPDATING`.
@@ -31,17 +31,17 @@ arm_timed_out                     false
 ```
 
 The kill landed 0.115 s before the healthy cycle would have finished. Most of
-that 2.12 s is the drain's poll interval, not work — the drain-only cycle in
-Phase 4A took 1.375 s and its update phase was ~0.1 s — so the kill landed
+that 2.12 s is the drain's poll interval, not work (the drain-only cycle in
+Phase 4A took 1.375 s and its update phase was ~0.1 s), so the kill landed
 essentially at the *opening* of `UPDATING`.
 
-One honest limit: `complete_weight_update` is the whole round trip —
-`/start_weight_update` → `/update_weights` ×N → `/finish_weight_update` **and**
-the tensor broadcast (`port.py:23`) — so the failure here surfaced on an HTTP
+One limit: `complete_weight_update` is the whole round trip
+(`/start_weight_update` → `/update_weights` ×N → `/finish_weight_update` **and**
+the tensor broadcast (`port.py:23`)), so the failure here surfaced on an HTTP
 socket, and this measurement cannot say whether the process died during the
-collective or in the calls around it. On a 125M model the
-collective is ~100 ms wide and the two are not separable. Phase 6 answers the
-question deliberately, with an 8B broadcast and a kill aimed at half of it.
+collective or in the calls around it. On a 125M model the collective is ~100 ms
+wide and the two are not separable. Phase 6 answers the question, with an 8B
+broadcast and a kill aimed at half of it.
 
 ## What was detected
 
@@ -60,8 +60,8 @@ outcome                  EngineTaintedError: engine tainted in state UPDATING:
 The path is the one `src/rolloutcore/runner.py:187-205` describes: an exception out
 of a **mutating** call is an unknown engine outcome, so the controller taints
 rather than guessing whether the weights landed. `ConnectionResetError(104)` is the
-kernel saying the peer is gone, not a timeout — which is why detection was fast
-and why the budget was never approached.
+kernel saying the peer is gone, not a timeout, which is why detection was fast and
+why the budget was never approached.
 
 The controller's own record afterwards:
 
@@ -74,15 +74,14 @@ committed  rc-1        ← the last version that was actually published
 
 ## Why this is the right outcome, not just a safe one
 
-`rc-2` was mid-broadcast when the engine died. There are exactly two possibilities
-— every tensor landed, or some prefix of them did — and neither is observable from
-the trainer side, because the acknowledgement (`/finish_weight_update`) is what
+`rc-2` was mid-broadcast when the engine died. There are two possibilities (every
+tensor landed, or some prefix of them did), and neither is observable from the
+trainer side, because the acknowledgement (`/finish_weight_update`) is what
 certifies completion and that socket is the thing that reset. Publishing `rc-2`
 would therefore claim a weight set that may not exist, and *not* tainting would
 leave the controller able to admit rollouts against an engine whose label no
-longer describes its weights. Both are exactly what I6 (*a failed update never
-publishes its target version*) and I8 (*a version mismatch is a hard failure*) are
-for.
+longer describes its weights. Both are what I6 (*a failed update never publishes
+its target version*) and I8 (*a version mismatch is a hard failure*) are for.
 
 The recorded check `committed == rc-1` is the observable form of that: the
 generation counter did not advance, so no trajectory can ever be bound to `rc-2`.
@@ -92,14 +91,14 @@ generation counter did not advance, so no trajectory can ever be bound to `rc-2`
 | | kill before the cycle (4B) | kill inside the update (4D) |
 |---|---|---|
 | Path that fails | `begin_drain` (a read-ish effect) | `complete_weight_update` (mutating) |
-| Taints? | **No** — `DRAINING` stays fail-closed | **Yes** — terminal |
+| Taints? | **No**: `DRAINING` stays fail-closed | **Yes**: terminal |
 | Detection | immediate (`Connection refused`) | 0.1767 s |
 | Version published | none | none |
 | Exit | operator taint, or engine comes back | fresh engine + fresh controller |
 
 4B's finding stands and 4D sharpens it: the *classification* is right in both
-cases — a failed drain writes nothing so it cannot be ambiguous, a failed update
-writes tensor bytes so it is — but the two ends of the pipeline both land in
+cases (a failed drain writes nothing so it cannot be ambiguous, a failed update
+writes tensor bytes so it is), but the two ends of the pipeline both land in
 "correctly detected, nowhere to go". A taint is terminal, and the recovery is a
 restart, which is what Phase 6 then priced at ~30 s.
 

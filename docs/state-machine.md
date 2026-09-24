@@ -1,4 +1,4 @@
-# RolloutCore lifecycle state machine — design
+# RolloutCore lifecycle state machine (design)
 
 **Design for Phases 1 and 2 (fake-engine cycle)**, and still the description of
 the controller as it stands through Phase 6. Pure Python, no vLLM import in the
@@ -67,15 +67,15 @@ That split is what makes the load-bearing claims testable:
 
 | State | Meaning | Phase 2 mapping |
 |---|---|---|
-| `UNINITIALIZED` | Constructed, not bound to a proven engine | — |
+| `UNINITIALIZED` | Constructed, not bound to a proven engine | n/a |
 | `READY` | Serving. **The only admitting state.** | engine resumed, `weight_version == rc-N` |
 | `DRAINING` | Drain requested; active rollouts must reach zero | `POST /pause?mode=wait` in flight |
 | `QUIESCED` | Drain proven: zero active work, engine paused | pause returned; `has_work() == False` |
 | `UPDATING` | Weights in flight over the native data plane | `/start_weight_update` … `/finish_weight_update` |
 | `INVALIDATING` | Dropping every cache holding previous-generation content | `/reset_prefix_cache` + `/reset_encoder_cache` + `/reset_mm_cache` |
-| `VALIDATING` | Proving the target **while still paused** | `GET /weight_info`, `GET /is_paused` — **no `/resume`** |
+| `VALIDATING` | Proving the target **while still paused** | `GET /weight_info`, `GET /is_paused`; **no `/resume`** |
 | `RESUMING` | Resume issued; confirming the engine is actually serving | `POST /resume`, `GET /is_paused` |
-| `TAINTED` | **Terminal in V1.** Never resumed, never rolled back | — |
+| `TAINTED` | **Terminal in V1.** Never resumed, never rolled back | n/a |
 
 Eight forward edges, `taint` legal from all nine states (no-op at `TAINTED`).
 The full 9×9 = 81-pair matrix is enumerated by
@@ -86,7 +86,7 @@ The full 9×9 = 81-pair matrix is enumerated by
 ### Why `VALIDATING` runs before `RESUMING` (amendment 1)
 
 Validation answers "are the right weights installed and are the caches clean?".
-Nothing about that answer requires the engine to be serving — and asking it
+Nothing about that answer requires the engine to be serving, and asking it
 while paused means a failure leaves the engine **unable to serve the unverified
 weights at all**, rather than serving them while we discover the problem.
 
@@ -125,12 +125,12 @@ Three outcomes, and getting the boundaries right is most of the design:
 | Kind | Behaviour | Rationale |
 |---|---|---|
 | **Illegal event** for the current state | `IllegalTransitionError`, state unchanged | Programming error; the state machine says what is allowed |
-| **Local precondition** — e.g. an update target that is not greater than the committed one | `InvariantViolation`, state unchanged | The engine is healthy; the call was wrong |
-| **Observation incomplete** — e.g. the drain is still running | `EvidenceNotReady`, state unchanged, **retryable** | Normal operation. Tainting here would destroy a healthy engine because a caller polled early |
-| **Engine evidence** contradicts a postcondition — e.g. `prefix_cache_reset=False`, resume unacknowledged | `EngineTaintedError`, **→ TAINTED** | We can no longer prove the engine's state |
-| **Ambiguous mutating failure** — an adapter effect raised before reporting | `EngineTaintedError`, **→ TAINTED** | The engine may have half-applied the effect; see below |
-| **Refused ownership** — the engine already reports `rc-*` | `AlreadyManagedEngineError`, state unchanged, controller stays `UNINITIALIZED` | Nothing was written and the engine is healthy — it is someone else's. Tainting would demand restarting a working engine |
-| **No effect attempted** — no usable transfer driver | `WeightTransferNotConfiguredError`, state unchanged | No side effect occurred, so there is nothing ambiguous to taint |
+| **Local precondition**, e.g. an update target that is not greater than the committed one | `InvariantViolation`, state unchanged | The engine is healthy; the call was wrong |
+| **Observation incomplete**, e.g. the drain is still running | `EvidenceNotReady`, state unchanged, **retryable** | Normal operation. Tainting here would destroy a healthy engine because a caller polled early |
+| **Engine evidence** contradicts a postcondition, e.g. `prefix_cache_reset=False`, resume unacknowledged | `EngineTaintedError`, **→ TAINTED** | We can no longer prove the engine's state |
+| **Ambiguous mutating failure**: an adapter effect raised before reporting | `EngineTaintedError`, **→ TAINTED** | The engine may have half-applied the effect; see below |
+| **Refused ownership**: the engine already reports `rc-*` | `AlreadyManagedEngineError`, state unchanged, controller stays `UNINITIALIZED` | Nothing was written and the engine is healthy; it is someone else's. Tainting would demand restarting a working engine |
+| **No effect attempted**: no usable transfer driver | `WeightTransferNotConfiguredError`, state unchanged | No side effect occurred, so there is nothing ambiguous to taint |
 
 Consequences:
 
@@ -229,12 +229,12 @@ These are deliberately separate types:
 | | `WeightVersion` | `WeightIdentity` |
 |---|---|---|
 | Meaning | *when*, for lifecycle ordering | *what declared source*, for provenance |
-| Serialised to the engine | yes, as `rc-<n>` | no — the engine has no field for it |
+| Serialised to the engine | yes, as `rc-<n>` | no; the engine has no field for it |
 | Used for | monotonicity, `cache_salt`, admission ordering | invariant I4, replay, cache-coherence comparison |
 | Equality implies | same update round | same declared weight source |
 
 `UpdateTarget` bundles them, and `begin_update` takes an `UpdateTarget` rather
-than a bare version — so a caller cannot open an update without saying which
+than a bare version, so a caller cannot open an update without saying which
 weights it intends to install. `RolloutBinding` copies both.
 
 **Why generation alone is insufficient for I4**: two controllers can publish
@@ -250,8 +250,8 @@ a description of weights. `TestI4ReplayIdentity` asserts this directly.
 | Provenance-qualified | the manifest **plus** `WeightProvenance(checkpoint, run_id, step)` | training steps | `"declared-source"` |
 
 A manifest digest is an *architecture* identity. Two checkpoints with the same
-tensors' names, dtypes and shapes — step 100 and step 500 of one run, or a base
-model and its fine-tune — produce the **same** manifest digest. That is the
+tensors' names, dtypes and shapes: step 100 and step 500 of one run, or a base
+model and its fine-tune, produce the **same** manifest digest. That is the
 normal case in RL, not an edge case, so a manifest digest alone cannot support
 the claim "this trajectory came from step 500". `WeightProvenance` supplies the
 missing part, is rejected if empty (an empty source would silently degrade to a
@@ -288,7 +288,7 @@ block 0. It is *not* a weight identity and *not* universal cache versioning:
 
 Hence `InvalidateEvidence` demands all three resets and taints if any is
 missing. A design relying on `cache_salt` alone would be silently wrong for any
-multimodal or LoRA workload — the failure class RFC #48312 category 7 tracks.
+multimodal or LoRA workload, the failure class RFC #48312 category 7 tracks.
 
 ### The invalidation boundary (amendment 7)
 
@@ -334,9 +334,9 @@ pause, the update and validation, and only the `/reset_*` triple empties them.
 
 The split is not cosmetic, and it is why the driver owns more than the tensor
 push. Upstream's trainer engine posts `/init_weight_transfer_engine` itself
-during `trainer_init` — concurrently with opening the trainer endpoint, because
+during `trainer_init`, concurrently with opening the trainer endpoint, because
 the workers block inside that call until the rendezvous completes
-(`nccl_engine.py:272-318`) — and `send_weights()` drives
+(`nccl_engine.py:272-318`). `send_weights()` in turn drives
 `/start_weight_update` → `/update_weights` → `/finish_weight_update`
 **concurrently** with the broadcast (`base.py:617-627`;
 `examples/rl/rlhf_http_nccl.py:193-196`). `POST /update_weights` blocks while the
@@ -352,14 +352,15 @@ a controller bootstrapped with it can never publish an update it did not
 perform. `NCCLWeightTransferDriver` is a documented Phase 3B landing zone whose
 methods raise; writing an untested NCCL wrapper would be a guess dressed up as
 an implementation. Two payloads that are **not** real and are no longer
-constructed: `{"init_info": {"backend": "nccl"}}` — `NCCLWeightTransferInitInfo`
-(`nccl_common.py:71`) requires `rank_offset`, `world_size`, and exactly one of
-`master_address`+`master_port` or `nccl_unique_id_b64` — and
+constructed: `{"init_info": {"backend": "nccl"}}`, which is not a valid
+`NCCLWeightTransferInitInfo` (`nccl_common.py:71`): that type requires
+`rank_offset`, `world_size`, and exactly one of `master_address`+`master_port` or
+`nccl_unique_id_b64`. The other is
 `{"names": [], "dtype_names": [], "shapes": []}`.
 
 No tensor crosses HTTP. Target backend: **`nccl` only**, following vLLM's
 two-GPU `Qwen/Qwen3-1.7B-Base` → `Qwen/Qwen3-1.7B` example
-(`examples/rl/rlhf_async_new_apis.py:61-62`) — with one deliberate deviation:
+(`examples/rl/rlhf_async_new_apis.py:61-62`), with one deviation:
 that example uses `pause_generation(mode="keep")`, which this design rejects in
 favour of `mode="wait"`.
 
@@ -367,7 +368,7 @@ favour of `mode="wait"`.
 
 ## 8. The typed adapter port
 
-`CyclePlan.steps` is **human-readable narration only** — for logs, error
+`CyclePlan.steps` is **human-readable narration only**, for logs, error
 messages and test failure output. Adapters must not parse it. The typed
 interface is `rolloutcore.port.LifecycleAdapter`:
 
@@ -379,7 +380,7 @@ interface is `rolloutcore.port.LifecycleAdapter`:
 | `start_weight_update(target)` | validates a driver exists; the driver posts `POST /start_weight_update` from inside `transfer` |
 | `complete_weight_update(target)` | `driver.transfer(target)` → `/start_weight_update` + `/update_weights` ×N + `/finish_weight_update`, interleaved with the collective |
 | `invalidate_caches(target)` | the `/reset_*` triple |
-| `validate_pre_resume(target)` | `GET /weight_info` + `GET /is_paused` — **must not resume** |
+| `validate_pre_resume(target)` | `GET /weight_info` + `GET /is_paused`: **must not resume** |
 | `resume(target)` | `POST /resume` + `GET /is_paused` |
 
 `WeightTransferDriver` is the second port, with two implementations and one
@@ -395,11 +396,11 @@ never a dispatch mechanism either.
 
 Two `LifecycleAdapter` implementations ship:
 
-- `adapters/fake.py` — `FakeVLLMAdapter` over an in-memory `FakeVLLMEngine` that
+- `adapters/fake.py`: `FakeVLLMAdapter` over an in-memory `FakeVLLMEngine` that
   reproduces the vLLM behaviours the design depends on (see §10). It also
   refuses a managed engine before writing, and reports
   `weight_transfer_driver="fake-in-process"`.
-- `adapters/http.py` — `HttpVLLMAdapter`, stdlib `urllib`, injectable
+- `adapters/http.py`: `HttpVLLMAdapter`, stdlib `urllib`, injectable
   `Transport` and `WeightTransferDriver`. Handles the traps: `/pause` has no
   server-side timeout, so it runs on a background thread with an explicit
   attempt state machine; `/reset_prefix_cache` returns HTTP 200 with
@@ -453,7 +454,7 @@ behaviours the design depends on, each traced to its vLLM source.
 |---|---|---|
 | `test_legal_transitions.py` | 18 | all 8 forward edges individually, full cycle, multi-cycle, journal, resume ordering |
 | `test_illegal_transitions.py` | 14 | all 81 (state, event) pairs; strong non-mutation; admission matrix across 9 states |
-| `test_invariants.py` | 52 | I1–I10, taint forensics, the plan's §13 mixed-version experiment |
+| `test_invariants.py` | 52 | I1-I10, taint forensics, the plan's §13 mixed-version experiment |
 | `test_evidence.py` | 35 | every `failure_reason` branch of all six evidence types, driver consistency, immutability |
 | `test_versions.py` | 45 | label round-trip, ordering, `WeightIdentity` canonicity, both identity tiers, `cache_salt` constraint |
 | `test_cycle.py` | 25 | **Phase 2**: full cycle over the fake engine, pause ordering, drain polling, pre-write bootstrap refusal, effect-vs-observation failure classification, a dead engine during a drain |
@@ -469,7 +470,7 @@ behaviours the design depends on, each traced to its vLLM source.
 the package; CI runs them on Python 3.11/3.12/3.13. The frozen-evidence
 immutability test asserts on a real dataclass *field* rather than a
 monkey-patched method, because on 3.11/3.12 the non-field path in a
-frozen+slots `__setattr__` raises `TypeError` instead of `FrozenInstanceError` —
+frozen+slots `__setattr__` raises `TypeError` instead of `FrozenInstanceError`;
 the guarantee held, the assertion was version-dependent.
 
 ---
@@ -482,7 +483,7 @@ the guarantee held, the assertion was version-dependent.
    only sanctioned driver?
 2. **Identity for the bootstrap weights.** `BootstrapEvidence.weight_identity` is
    supplied by the adapter, because the engine cannot report one. For a real
-   `vllm serve`, where should it come from — vLLM's trainer-side
+   `vllm serve`, where should it come from: vLLM's trainer-side
    `WeightSource.metadata()` plus a `WeightProvenance`, the model loader's
    `ParamMeta`, or the checkpoint's revision metadata? Phase 3A begins to answer
    this empirically by recording what the adapter can actually observe.
@@ -498,7 +499,7 @@ the guarantee held, the assertion was version-dependent.
    current table cannot express that (`QUIESCED` has exactly one outgoing edge,
    to `UPDATING`). Phase 3A therefore runs at the **adapter** level and the
    controller is deliberately tainted at the end, because the adapter resumed an
-   engine the controller cannot vouch for — see `docs/phase3a-runbook.md` and
+   engine the controller cannot vouch for; see `docs/phase3a-runbook.md` and
    `scripts/live_control_plane_smoke.py`. The open question stands: should V1 add
    a revalidation edge (same committed target, caches dropped, no update), or
    should every cache-revalidation be a generation bump with a real no-op

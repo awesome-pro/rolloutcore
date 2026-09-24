@@ -1,4 +1,4 @@
-# Phase 4C results — no cross-version cache reuse, measured and then made to happen
+# Phase 4C results: no cross-version cache reuse, measured and then made to happen
 
 **Result: PASS. 8/8 checks.** Two phases against real vLLM: the guarantee
 asserted through the public prefix-cache metrics, and then a negative control
@@ -14,26 +14,26 @@ belt-and-braces.
 | Model | `facebook/opt-125m`, TP=1 on GPU 0 (`--load-format dummy`), bf16 trainer on GPU 1 |
 | Artifact | `results/phase4c.json` |
 
-This is invariant I3 — *KV created under generation N is never consumed under
-N+1* — and it is the half of the project that vLLM has no mechanism for. The
+This is invariant I3 (*KV created under generation N is never consumed under
+N+1*), and it is the half of the project that vLLM has no mechanism for. The
 prefix cache maps token blocks to KV blocks and knows nothing about which weights
 produced them, `finish_weight_update` invalidates no cache
 (`gpu_worker.py:1488-1505`), and `reset_prefix_cache` is called only by explicit
-engine APIs (`llm_engine.py:361`, `async_llm.py:1089`, `core_client.py:398`) —
-never by the weight-update path. So the reset is the caller's job, and this phase
-is where that job is either discharged or shown to be theatre.
+engine APIs (`llm_engine.py:361`, `async_llm.py:1089`, `core_client.py:398`), never
+by the weight-update path. So the reset is the caller's job, and this phase is
+where that job is either discharged or shown to be theatre.
 
 **One amendment postdates this run.** The cycle now pauses with
 `clear_cache=false`, so `INVALIDATING` is the only place caches are dropped
 (`docs/state-machine.md`, "The invalidation boundary"). The run below was made
-when the pause also cleared — which is exactly the ambiguity that amendment
-removes: Phase 1's zero-hit result cannot by itself separate the pause's clear
+when the pause also cleared, which is the ambiguity that amendment removes:
+Phase 1's zero-hit result cannot by itself separate the pause's clear
 from the reset's, and Phase 2 is what pins the reset, because it runs with
 `clear_cache=false` and no reset at all.
 
 ---
 
-## Phase 1 — the guarantee, and it gates
+## Phase 1: the guarantee, and it gates
 
 Prefix caching is on by default (`vllm/config/cache.py:142`), so the lane is
 live without any flag. The sequence is: send prompt `P`, send `P` again to prove
@@ -52,7 +52,7 @@ post_update  first text     ' Lisbon. The capital of the United Kingdom is…'
 
 The first post-update request must score **zero** new hits: every one of its
 tokens was computed under `rc-0`, so a hit would mean a trajectory assembled from
-two weight sets. The second request must score hits again — otherwise "no reuse"
+two weight sets. The second request must score hits again; otherwise "no reuse"
 is indistinguishable from "caching silently switched off", which is the failure
 mode that a naive zero-delta assertion cannot tell apart. Both hold, and the
 counts come from vLLM's own `vllm:prefix_cache_hits_total` /
@@ -60,7 +60,7 @@ counts come from vLLM's own `vllm:prefix_cache_hits_total` /
 
 The cycle itself took 2.1404 s and visited all eight states.
 
-## Phase 2 — the hazard, made to happen on purpose
+## Phase 2: the hazard, made to happen on purpose
 
 A passing assertion that "no reuse occurred" is only as good as the claim that
 reuse *could* have occurred. So the second phase removes RolloutCore from the
@@ -102,22 +102,22 @@ step is load-bearing."*
 `corrupted_weights_share_the_manifest_digest` passes, and it is the cleanest
 statement of the blind spot item 5 exists to fix. The negated checkpoint, the
 real `opt-125m`, and the dummy-initialised `opt-125m` all report
-`925369d663bc` — the digest covers parameter names, dtypes and shapes, and a
-sign flip changes none of them.
+`925369d663bc`: the digest covers parameter names, dtypes and shapes, and a sign
+flip changes none of them.
 
 Phase 3C found the same digest for dummy and real weights. That was enough to
 show `WeightIdentity.parse` cannot separate two checkpoints of one architecture;
 this run shows it again for a *corrupted* one, which is the case that would
 actually hurt: a bad update would be indistinguishable from a good one by digest
-alone. Declared provenance (checkpoint/run/step, Phase 5) is the answer — the
-same manifest yields two different identities once a step is declared
-(`c8c0aafd93a5` for step 0, `f7a652cf4d70` for step 1) — and
+alone. Declared provenance (checkpoint/run/step, Phase 5) is the answer: the same
+manifest yields two different identities once a step is declared
+(`c8c0aafd93a5` for step 0, `f7a652cf4d70` for step 1), and
 `Trajectory.replay_ready` is what refuses to pretend otherwise.
 
 ## What Phase 4C does *not* prove
 
 - **No encoder/multimodal lane.** `/reset_encoder_cache` and `/reset_mm_cache`
-  are no-ops on a text-only model — Phase 3A measured that all three cache resets
+  are no-ops on a text-only model: Phase 3A measured that all three cache resets
   return success while two of them have nothing to clear. A multimodal checkpoint
   is the only way to exercise the encoder lane, and that is deferred.
 - **`opt-125m`, one node, TP=1, one request at a time.** No interaction with

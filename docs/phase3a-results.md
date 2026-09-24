@@ -1,4 +1,4 @@
-# Phase 3A results — real vLLM control plane, one GPU
+# Phase 3A results: real vLLM control plane, one GPU
 
 **Result: PASS. 16/16 checks, 0 warnings, 0 failures**, against the audited
 commit, on a real `vllm serve`.
@@ -49,8 +49,8 @@ in-flight request:  256 tokens in 2.0203 s
 drain completed:    2.1313 s after the pause began   (+110 ms)
 ```
 
-If the drain had used `mode="abort"` — or if `mode="wait"` had silently been
-rejected and retried — the drain would have returned in milliseconds and the
+If the drain had used `mode="abort"` (or if `mode="wait"` had silently been
+rejected and retried), the drain would have returned in milliseconds and the
 stream would have been truncated. It did neither. This is the behaviour I2
 ("one weight version per rollout") depends on, verified on a real engine for the
 first time.
@@ -66,7 +66,7 @@ first time.
 | **total control plane, excluding the drain wait** | **≈ 46 ms** |
 
 The drain itself is bounded by real work, not by our code: 2.13 s for a request
-that took 2.02 s. That ~46 ms figure is the honest headline for the project —
+that took 2.02 s. That ~46 ms figure is the honest headline for the project,
 and it is a *lower* bound, since Phase 3A does not transfer any weights.
 
 ### Generation determinism
@@ -92,7 +92,7 @@ is warm-up (CUDA context, kernels), not caching.
   and the controller agreed on one version throughout.
 - **`WeightIdentity` is declared, not verified.** The identity recorded is
   `4d15b0ad0141 (declared checkpoint=facebook/opt-125m@27dcfa74…)`, computed from
-  the real parameter manifest — but the engine only reports an opaque version
+  the real parameter manifest, but the engine only reports an opaque version
   string, so nothing confirms that its memory holds those bytes.
 - **No mixed-version guarantee was exercised.** Without a real update there is
   no second version for a rollout to straddle; that is Phase 3B/3C.
@@ -108,9 +108,10 @@ affecting the verdict above:
 
 1. **`world_size` is observed and then discarded.** `GET /get_world_size` is
    called, but `bootstrap` reports `world_size=None` whenever no transfer driver
-   is configured. The engine answered. Phase 3B needs exactly this number — the
-   NCCL rendezvous is sized `1 + get_world_size()` (`examples/rl/rlhf_http_nccl.py:177-179`)
-   — so it should be recorded unconditionally.
+   is configured. The engine answered. Phase 3B needs this number: the NCCL
+   rendezvous is sized `1 + get_world_size()`
+   (`examples/rl/rlhf_http_nccl.py:177-179`), and it should be recorded
+   unconditionally.
 2. **`rolloutcore_dirty: true` over-reports.** The tree had no modified tracked
    files; the flag was tripped by an untracked scratch file at the repo root.
    `git status --porcelain` should be run with `--untracked-files=no`, or the
@@ -119,7 +120,7 @@ affecting the verdict above:
 And three observations that inform Phase 3B and Phase 6:
 
 3. `/reset_encoder_cache` and `/reset_mm_cache` return **200 on a text-only
-   model**. All three resets are therefore satisfiable on any model — but on a
+   model**. All three resets are therefore satisfiable on any model, but on a
    text model the encoder/MM half is a no-op, so proving the encoder lane needs a
    multimodal model (Phase 6's cache-coherence experiment).
 4. The controller journal from the real run is
@@ -137,7 +138,7 @@ The adapter resumed an engine the controller did not resume, because V1's table
 has no update-free revalidation path (`docs/state-machine.md` §12 item 5). A
 controller that cannot vouch for a serving engine must not claim `READY`, so it
 taints. The report marks this `expected: true`, and it is the correct fail-closed
-outcome rather than a workaround — the alternative would have been fabricating an
+outcome rather than a workaround: the alternative would have been fabricating an
 update, which the plan forbids.
 
 ## Reproduce

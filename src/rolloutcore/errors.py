@@ -47,7 +47,7 @@ class InvariantViolation(RolloutCoreError):
 
 
 class EvidenceNotReady(InvariantViolation):
-    """The observation is simply incomplete — the caller was early.
+    """The observation is incomplete: the caller was early.
 
     Distinct from both ``InvariantViolation`` (which usually means RolloutCore's
     own bookkeeping disagrees with itself) and ``EngineTaintedError`` (which

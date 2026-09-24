@@ -1,7 +1,7 @@
-# RolloutCore × vLLM — source-level integration map
+# RolloutCore × vLLM: source-level integration map
 
 **Target:** `vllm-project/vllm` @ `main`
-**Commit audited:** `00b7847c8036b667742b4efb21aab1de51fd4721` — *"[Perf] Use Conv3dLayer for MiniMax M3 patch embedding (#58512)"*, committer date `2026-09-24T07:41:36Z`
+**Commit audited:** `00b7847c8036b667742b4efb21aab1de51fd4721`, *"[Perf] Use Conv3dLayer for MiniMax M3 patch embedding (#58512)"*, committer date `2026-09-24T07:41:36Z`
 **Verification:** git worktree at `/Users/abhinandan/Desktop/vllm-learning/vendor/vllm-main`, fetched directly from `https://github.com/vllm-project/vllm.git`. `git ls-remote origin refs/heads/main` and `gh api repos/vllm-project/vllm/commits/main` both return this SHA; working tree clean; audited read-only.
 
 > The sibling checkout `/Users/abhinandan/Desktop/vllm-learning/vendor/vllm` is a **stale fork** (`d90f0eade5`) and was not used. The worktree is a **shallow** clone (depth 1), so "not present" means *absent at this commit*, not *never existed*.
@@ -20,9 +20,9 @@ Every claim carries a `path:LINE` anchor plus the owning class/function. Anythin
 | 4 | It is **never auto-incremented**; the only mutation is a verbatim assignment. | `core.py:1043` |
 | 5 | `finish_weight_update` invalidates **no cache**. Its only worker-side cleanup is `reset_lora_state()`, which clears LoRA adapters when one is configured. | `async_llm.py:1284-1288`; `gpu_worker.py:1488-1505` |
 | 6 | Prefix-cache keys contain **no weight generation**. Extra keys are only LoRA *name*, MM hashes, `cache_salt`, prompt-embed hashes. | `kv_cache_utils.py:610-646` |
-| 7 | `cache_salt` is the **only caller-controllable identity input** to the cache key — and it **is** exposed on the OpenAI API. | `kv_cache_utils.py:632-634`; `chat_completion/protocol.py:456` |
+| 7 | `cache_salt` is the **only caller-controllable identity input** to the cache key, and it **is** exposed on the OpenAI API. | `kv_cache_utils.py:632-634`; `chat_completion/protocol.py:456` |
 | 8 | `pause(mode="wait")` **is** a true drain and **does** clear prefix/MM/encoder caches when `clear_cache=True`. | `core.py:877-882`, `:1984-2026` |
-| 9 | `call_utility` / `call_utility_async` have **no timeout** — a drain that never completes blocks its HTTP caller forever. | `core_client.py:996-1002`, `:1236-1248` |
+| 9 | `call_utility` / `call_utility_async` have **no timeout**: a drain that never completes blocks its HTTP caller forever. | `core_client.py:996-1002`, `:1236-1248` |
 | 10 | `mode="keep"` **honours** `clear_cache`, contradicting the `/pause` docstring. | `core.py:2017-2021` vs `rlhf/api_router.py:46-47` |
 | 11 | `release_kv_cache_memory()` is a **KV-only** eviction requiring a completed pause; it does not touch weights. | `core.py:984-1002` |
 | 12 | vLLM has a **first-class plugin API** for adding HTTP routes and worker RPCs without forking. | `vllm/plugins/endpoint_plugins/interface.py:44`; `vllm/plugins/__init__.py:93` |
@@ -53,7 +53,7 @@ Every claim carries a `path:LINE` anchor plus the owning class/function. Anythin
 
 > `vllm/entrypoints/openai/api_server.py` is a **deprecation re-export shim** (`:6-27`); it no longer defines `run_server` / `build_async_engine_client`. There is no `serving_chat.py` / `serving_completion.py`.
 
-### 1.2 Input processing — the unification point
+### 1.2 Input processing: the unification point
 
 **`vllm/v1/engine/processor.py` does NOT exist on main@00b7847c.** The class is `InputProcessor` in `vllm/v1/engine/input_processor.py:41`.
 
@@ -67,7 +67,7 @@ Every claim carries a `path:LINE` anchor plus the owning class/function. Anythin
 | `cache_salt` passthrough | `:483 cache_salt=decoder_input.get("cache_salt")` |
 | Trace-replay normalisation | `:205-227`, invoked `:430-431`; hard error without `enable_trace_replay` `:168-176` |
 
-### 1.3 `EngineCoreRequest` — `vllm/v1/engine/__init__.py:109`
+### 1.3 `EngineCoreRequest` (`vllm/v1/engine/__init__.py:109`)
 
 `msgspec.Struct`, `array_like=True`, `omit_defaults=True`, `gc=False`:
 
@@ -76,7 +76,7 @@ Every claim carries a `path:LINE` anchor plus the owning class/function. Anythin
 > **No metadata bag, no weight version.** `trace_headers: Mapping[str, str]` (`:142`) is the only opaque caller bag and is consumed only by tracing.
 > `client_index`, `current_wave`, `external_req_id`, `reasoning_ended`, `reasoning_parser_kwargs`, `abort_immediately` are **not** set at `:473-490`; they are filled later.
 
-### 1.4 API-server engine — `AsyncLLM` (`vllm/v1/engine/async_llm.py:80`)
+### 1.4 API-server engine: `AsyncLLM` (`vllm/v1/engine/async_llm.py:80`)
 
 | Item | Anchor |
 |---|---|
@@ -89,11 +89,11 @@ Every claim carries a `path:LINE` anchor plus the owning class/function. Anythin
 | `assign_request_id` | `:485` |
 | Output handler task (lazy start) | `:490`, `:811-872` (`:815 await engine_core.get_output_async()`) |
 | `generate(...)` | `:664-683`; pull loop `:730-740`; `q.close()` `:788-789` |
-| **There is no `AsyncLLM.output_queue`** | per-request `RequestOutputCollector` instead — `output_processor.py:51-111` |
+| **There is no `AsyncLLM.output_queue`** | per-request `RequestOutputCollector` instead: `output_processor.py:51-111` |
 | Abort on disconnect | `:745-750` (`asyncio.CancelledError` / `GeneratorExit`) → `abort(q.request_id, internal=True)` |
 | `abort(...)` | `:874-885` |
 
-`RequestOutputCollector` — `vllm/v1/engine/output_processor.py:51`: `__init__:59-63` (`self.aggregate = output_kind == RequestOutputKind.DELTA`), `put():67-81` (merges via `self.output.add(...)` when the producer outruns the consumer), `get():83-91`, `get_nowait():93-101`, `close():103-106`.
+`RequestOutputCollector` (`vllm/v1/engine/output_processor.py:51`): `__init__:59-63` (`self.aggregate = output_kind == RequestOutputKind.DELTA`), `put():67-81` (merges via `self.output.add(...)` when the producer outruns the consumer), `get():83-91`, `get_nowait():93-101`, `close():103-106`.
 
 ### 1.5 Core loop
 
@@ -104,17 +104,17 @@ Every claim carries a `path:LINE` anchor plus the owning class/function. Anythin
 | `EngineCore.step` | `core.py:633-662` (`:643 schedule`, `:644 execute_model`, `:657 update_from_output`) |
 | `EngineCore.step_with_batch_queue` | `core.py:673-786` |
 | `_process_aborts_queue` | `core.py:788-796` |
-| `EngineCore.preprocess_add_request` | `core.py:1049-1071` — `:1063 Request.from_engine_core_request(...)`, `:1064-1070` grammar init |
+| `EngineCore.preprocess_add_request` | `core.py:1049-1071`: `:1063 Request.from_engine_core_request(...)`, `:1064-1070` grammar init |
 | `EngineCoreProc` | `core.py:1088`; `input_queue:1107`, `output_queue:1108` |
 | `run_busy_loop` | `core.py:1469-1481` |
-| `_process_input_queue` | `core.py:1496-1524` — idle branch `:1499-1501` fires idle callbacks |
+| `_process_input_queue` | `core.py:1496-1524`: idle branch `:1499-1501` fires idle callbacks |
 | `_process_engine_step` | `core.py:1526-1542` |
 | `_handle_client_request` | `core.py:1597-1629`; UTILITY `:1610-1623` |
 | `process_input_sockets` | `core.py:1754-1854`; **ABORT pushed to both `aborts_queue` and `input_queue`** `:1846-1851` |
 | `process_output_sockets` | `core.py:1856-1916` |
 | `RequestStatus` | `vllm/v1/request.py:370-397` |
 
-### 1.6 Scheduler — admission and state machine
+### 1.6 Scheduler: admission and state machine
 
 | Item | Anchor |
 |---|---|
@@ -135,7 +135,7 @@ Every claim carries a `path:LINE` anchor plus the owning class/function. Anythin
 
 > `FINISHED_IGNORED` is declared (`:384`) and mapped (`:408`) but **never assigned** anywhere in `vllm/**/*.py`. Over-long prompts are rejected earlier at `input_processor.py:523-537`.
 
-### 1.7 Admission / completion hook points — what actually exists
+### 1.7 Admission / completion hook points: what actually exists
 
 **There is no generic admission or completion callback on `Request`, and no request-level hook registry.** (`grep callback` over `v1/request.py`, `v1/core/sched/scheduler.py`, `v1/engine/input_processor.py` → 0 hits.)
 
@@ -176,7 +176,7 @@ What exists:
 
 ### 2.2 The write hook
 
-`AsyncLLM.finish_weight_update` — `async_llm.py:1284-1288`:
+`AsyncLLM.finish_weight_update` (`async_llm.py:1284-1288`):
 
 ```python
 await self.collective_rpc("finish_weight_update")
@@ -184,9 +184,9 @@ if weight_version is not None:
     await self.update_weight_version(weight_version)
 ```
 
-- Version is written **after** the worker finalize RPC returns — matching RFC #48306's convention *"Version increments when `finish_weight_update` returns."*
-- Worker side — `gpu_worker.py:1488-1505`: `weight_transfer_engine.finish_weight_update()` (`:1499`), `reset_weight_update_target()` (`:1500`), clear `_weight_update_active` (`:1501`), then `if not self._weight_update_is_draft: self.model_runner.reset_lora_state()` (`:1504-1505`). Comment at `:1503`: *"Weight transfer bypasses GPUModelRunner.reload_weights()."* **Nothing else — no cache invalidation.**
-- `reset_lora_state` — `vllm/v1/worker/lora_model_runner_mixin.py:29-39`: removes all adapters and resets `LogitsProcessorWithLoRA` sharded→full mappings.
+- Version is written **after** the worker finalize RPC returns, matching RFC #48306's convention *"Version increments when `finish_weight_update` returns."*
+- Worker side (`gpu_worker.py:1488-1505`): `weight_transfer_engine.finish_weight_update()` (`:1499`), `reset_weight_update_target()` (`:1500`), clear `_weight_update_active` (`:1501`), then `if not self._weight_update_is_draft: self.model_runner.reset_lora_state()` (`:1504-1505`). Comment at `:1503`: *"Weight transfer bypasses GPUModelRunner.reload_weights()."* **Nothing else: no cache invalidation.**
+- `reset_lora_state` (`vllm/v1/worker/lora_model_runner_mixin.py:29-39`): removes all adapters and resets `LogitsProcessorWithLoRA` sharded→full mappings.
 
 ### 2.3 HTTP surface (all `VLLM_SERVER_DEV_MODE=1`)
 
@@ -211,12 +211,12 @@ if weight_version is not None:
 
 - **`weight_version` attached to any request/output object?** **NO.** `grep -rl weight_version vllm/ --include=*.py` → 55 matches in exactly 9 files: `v1/engine/async_llm.py`, `v1/engine/core_client.py`, `v1/engine/llm_engine.py`, `v1/engine/core.py`, `distributed/weight_transfer/clients.py`, `distributed/weight_transfer/base.py`, `entrypoints/llm.py`, `entrypoints/serve/dev/rlhf/api_router.py`, `engine/protocol.py`. Zero occurrences in `vllm/v1/request.py`, `vllm/outputs.py`, `vllm/v1/engine/__init__.py`, `vllm/v1/engine/output_processor.py`.
 - **Auto-incremented?** **NO.** Sole mutation is verbatim assignment (`core.py:1043`); initial value is the literal `"default"` (`core.py:137`); `grep "_weight_version *[+-]="` → 0 matches. Every entry originates from a caller argument.
-- **Per-DP-rank?** `AsyncMPClient.set_weight_version_async` (`core_client.py:1306-1310`) routes through `call_utility_async`, which `DPLBAsyncMPClient` **overrides to broadcast** across `self.core_engines` (`core_client.py:1636-1645`) but which for `DPAsyncMPClient` (external LB) targets only its single colocated engine. So: *one engine per client* under external LB — the version must be set per instance.
+- **Per-DP-rank?** `AsyncMPClient.set_weight_version_async` (`core_client.py:1306-1310`) routes through `call_utility_async`, which `DPLBAsyncMPClient` **overrides to broadcast** across `self.core_engines` (`core_client.py:1636-1645`) but which for `DPAsyncMPClient` (external LB) targets only its single colocated engine. So: *one engine per client* under external LB; the version must be set per instance.
 - **Commit certificate / read-your-writes?** **NO.** `GET /weight_info` returns the last value *set*; there is no per-rank reconcile proof.
 
-### 2.5 Why it is caller-supplied — the PR that made it so
+### 2.5 Why it is caller-supplied: the PR that made it so
 
-`vllm-project/vllm#49040` — *"[Core][Frontend] Add weight version tagging for RL rollouts"* — **merged 2026-07-28**. Per the maintainer thread on RFC #48306 (comment by `hongzhi-gao`, 2026-09-16), #49040 *"implemented the query/update APIs, but intentionally removed binding a version to `Request`/`RequestOutput` after review noted that one request may span multiple weight versions."*
+`vllm-project/vllm#49040`: *"[Core][Frontend] Add weight version tagging for RL rollouts"*, **merged 2026-07-28**. Per the maintainer thread on RFC #48306 (comment by `hongzhi-gao`, 2026-09-16), #49040 *"implemented the query/update APIs, but intentionally removed binding a version to `Request`/`RequestOutput` after review noted that one request may span multiple weight versions."*
 
 **Consequence:** per-request version stamping is an *open, deliberately deferred* contract, not an oversight. An MVP must not assume it.
 
@@ -224,7 +224,7 @@ if weight_version is not None:
 
 ## 3. Native weight-update APIs and backends
 
-### 3.1 Worker-side interface — `vllm/distributed/weight_transfer/base.py`
+### 3.1 Worker-side interface: `vllm/distributed/weight_transfer/base.py`
 
 | Symbol | Line | Notes |
 |---|---|---|
@@ -242,7 +242,7 @@ if weight_version is not None:
 | `__init__(config, vllm_config, device, model)` | `:382` | |
 | `set_weight_update_target` / `reset_weight_update_target` | `:407` / `:416` | |
 | `parse_init_info` / `parse_update_info` | `:421` / `:441` | base-only impls |
-| **`init_transfer_engine(init_info)`** | `:462` | **abstract** — note the name: *not* `init_weight_transfer_engine` |
+| **`init_transfer_engine(init_info)`** | `:462` | **abstract**; note the name: *not* `init_weight_transfer_engine` |
 | `start_weight_update` | `:473` | abstract |
 | `finish_weight_update` | `:483` | abstract |
 | `update_weights(update_info: dict)` | `:491` | **concrete**: `parse_update_info` → `receive_weights` → `torch.accelerator.synchronize()` |
@@ -252,9 +252,9 @@ if weight_version is not None:
 | `VLLMWeightSyncClient(Protocol)` | `:524` | `init_weight_transfer_engine:542`, `start_weight_update:544`, `update_weights:546`, `finish_weight_update(weight_version):548` |
 | `TrainerWeightTransferEngine(ABC, Generic[...])` | `:551` | `init_info_cls:583`, `__init__:585`, `trainer_init:600`, `send_weights:617`, `shutdown:625` |
 
-> **Name trap:** `init_weight_transfer_engine` exists only at the *outer* layers — `Worker` (`gpu_worker.py:1394`), `AsyncLLM` (`async_llm.py:1252`), `LLM` (`llm.py:869`), `EngineClient` (`protocol.py:285`), sync clients (`clients.py:78`, `:106`), HTTP route (`api_router.py:156`). The engine method is `init_transfer_engine` (`base.py:462`).
+> **Name trap:** `init_weight_transfer_engine` exists only at the *outer* layers: `Worker` (`gpu_worker.py:1394`), `AsyncLLM` (`async_llm.py:1252`), `LLM` (`llm.py:869`), `EngineClient` (`protocol.py:285`), sync clients (`clients.py:78`, `:106`), HTTP route (`api_router.py:156`). The engine method is `init_transfer_engine` (`base.py:462`).
 
-### 3.2 Backends — registry in `vllm/distributed/weight_transfer/factory.py`
+### 3.2 Backends: registry in `vllm/distributed/weight_transfer/factory.py`
 
 | Key | Worker engine (module) | Trainer engine | Registered |
 |---|---|---|---|
@@ -263,18 +263,18 @@ if weight_version is not None:
 | `sparse_nccl` | `SparseNCCLWeightTransferEngine` (`sparse_nccl_engine.py:113`) | `SparseNCCLTrainerWeightTransferEngine` (`:193`) | `factory.py:234-238`, `:260-264` |
 | `sharded_rdt` | `ShardedRDTWeightTransferEngine` (`sharded_rdt_engine.py:267`) | `ShardedRDTTrainerWeightTransferEngine` (`sharded_rdt_trainer.py:800`) | `factory.py:240-244`, `:266-270` |
 
-**A plain `"rdt"` backend does NOT exist on main@00b7847c** — only `sharded_rdt`. `RdtRouter` (`sharded_rdt_common.py:102`) is a routing helper, not an engine.
+**A plain `"rdt"` backend does NOT exist on main@00b7847c**: only `sharded_rdt`. `RdtRouter` (`sharded_rdt_common.py:102`) is a routing helper, not an engine.
 
 Factories: `WeightTransferEngineFactory.create_engine()` `factory.py:85-121` (unknown backend → `ValueError` `:110-113`); `WeightTransferTrainerFactory.trainer_init()` `:167-215` (dispatches on `init_info.backend` `:197-204`). Both extensible at runtime via `register_engine(name, cls)` `:41-82` / `:137-164`. Re-exports `vllm/distributed/weight_transfer/__init__.py:19-22`.
 
 Per-backend notes:
 
-- **NCCL** — init info `NCCLWeightTransferInitInfo` (`nccl_common.py:71`, shared with sparse): `master_address:100`, `master_port:101`, `rank_offset:102`, `world_size:103`, `nccl_unique_id_b64:104`, `packed:105`, `packed_buffer_size_bytes:106`, `packed_num_buffers:107`. Update info `NCCLWeightTransferUpdateInfo` (`nccl_engine.py:85`): `names:94`, `dtype_names:95`, `shapes:96`. `init_transfer_engine:143`, `start_weight_update:160` (`initialize_layerwise_reload`), `finish_weight_update:168` (`finalize_layerwise_reload`), `receive_weights:176` (packed `:209-217` via `packed_nccl_broadcast_consumer(..., post_unpack_func=self.model.load_weights)`, unpacked `:225-228` `self.model.load_weights([(name, weight)])`).
-- **IPC** — `IPCWeightTransferInitInfo:37` (`packed:45`), `IPCTrainerInitInfo:49`, `IPCWeightTransferUpdateInfo:64` (`names:67`, `dtype_names:68`, `shapes:69`, `ipc_handles:70`, `ipc_handles_pickled:74`, `tensor_sizes:76`; `__post_init__:80` requires handles XOR pickled handles; unpickling gated on `envs.VLLM_ALLOW_INSECURE_SERIALIZATION:87`). `receive_weights:183` → `self.model.load_weights(weights)` `:246`.
-- **sparse_nccl** — `SparseWeightPatch:55`, `SparseNCCLTrainerInitInfo:66`, `SparseNCCLWeightTransferUpdateInfo:81`. `supports_draft_weight_update = False:125`. `start_weight_update:143` and `finish_weight_update:147` are **explicit no-ops** (docstring: *"sparse patches are applied in place, no layerwise reload"*). Reuses `NCCLWeightTransferInitInfo` (`:123`). Applies via `load_checkpoint_weight_patches` `:186` — **not** `model.load_weights`.
-- **sharded_rdt** — `ShardedRDTWeightTransferInitInfo:160`, `ShardedRDTWeightTransferUpdateInfo:256` (**deliberately empty**), `defers_processing = True:293`, `supports_draft_weight_update = False:296`; requires `distributed_executor_backend == "ray"` (`:315-322`); `_bake():811` drives a meta dry-run `model.load_weights(...)` `:854`; `update_weights` **is overridden** `:665` (no device sync); `drain_pending():1051`.
+- **NCCL**: init info `NCCLWeightTransferInitInfo` (`nccl_common.py:71`, shared with sparse): `master_address:100`, `master_port:101`, `rank_offset:102`, `world_size:103`, `nccl_unique_id_b64:104`, `packed:105`, `packed_buffer_size_bytes:106`, `packed_num_buffers:107`. Update info `NCCLWeightTransferUpdateInfo` (`nccl_engine.py:85`): `names:94`, `dtype_names:95`, `shapes:96`. `init_transfer_engine:143`, `start_weight_update:160` (`initialize_layerwise_reload`), `finish_weight_update:168` (`finalize_layerwise_reload`), `receive_weights:176` (packed `:209-217` via `packed_nccl_broadcast_consumer(..., post_unpack_func=self.model.load_weights)`, unpacked `:225-228` `self.model.load_weights([(name, weight)])`).
+- **IPC**: `IPCWeightTransferInitInfo:37` (`packed:45`), `IPCTrainerInitInfo:49`, `IPCWeightTransferUpdateInfo:64` (`names:67`, `dtype_names:68`, `shapes:69`, `ipc_handles:70`, `ipc_handles_pickled:74`, `tensor_sizes:76`; `__post_init__:80` requires handles XOR pickled handles; unpickling gated on `envs.VLLM_ALLOW_INSECURE_SERIALIZATION:87`). `receive_weights:183` → `self.model.load_weights(weights)` `:246`.
+- **sparse_nccl**: `SparseWeightPatch:55`, `SparseNCCLTrainerInitInfo:66`, `SparseNCCLWeightTransferUpdateInfo:81`. `supports_draft_weight_update = False:125`. `start_weight_update:143` and `finish_weight_update:147` are **explicit no-ops** (docstring: *"sparse patches are applied in place, no layerwise reload"*). Reuses `NCCLWeightTransferInitInfo` (`:123`). Applies via `load_checkpoint_weight_patches` `:186`, **not** `model.load_weights`.
+- **sharded_rdt**: `ShardedRDTWeightTransferInitInfo:160`, `ShardedRDTWeightTransferUpdateInfo:256` (**deliberately empty**), `defers_processing = True:293`, `supports_draft_weight_update = False:296`; requires `distributed_executor_backend == "ray"` (`:315-322`); `_bake():811` drives a meta dry-run `model.load_weights(...)` `:854`; `update_weights` **is overridden** `:665` (no device sync); `drain_pending():1051`.
 
-### 3.3 Config — `vllm/config/weight_transfer.py:9`
+### 3.3 Config: `vllm/config/weight_transfer.py:9`
 
 ```python
 @config
@@ -309,7 +309,7 @@ POST /update_weights  {"update_info": {...}}
 
 `vllm/entrypoints/llm.py`: `init_weight_transfer_engine:869` (accepts dict or dataclass), `start_weight_update:886`, `start_draft_weight_update:890`, `update_weights:894`, `finish_weight_update:909` (`:911` RPC then `:913 set_weight_version`), `update_weight_version:915`, `get_weight_version:919`. Also `sleep:808`, `release_kv_cache_memory:833`, `wake_up:841`.
 
-> `start_draft_weight_update` is **NOT PRESENT** on `LLMEngine`, `EngineCoreClient`, `InprocClient`, `MPClient` or `AsyncMPClient` — only on `AsyncLLM:1269`, `LLM:890`, `EngineClient:295`, `Worker:1418`, route `:180`.
+> `start_draft_weight_update` is **NOT PRESENT** on `LLMEngine`, `EngineCoreClient`, `InprocClient`, `MPClient` or `AsyncMPClient`. It exists only on `AsyncLLM:1269`, `LLM:890`, `EngineClient:295`, `Worker:1418`, route `:180`.
 
 ---
 
@@ -317,11 +317,11 @@ POST /update_weights  {"update_info": {...}}
 
 ### 4.1 Types
 
-- `PauseMode = Literal["abort", "wait", "keep"]` — `vllm/v1/engine/__init__.py:32`
-- `PauseState(IntEnum)` = `UNPAUSED=0`, `PAUSED_NEW=1`, `PAUSED_ALL=2` — `vllm/v1/core/sched/interface.py:24-35`
-- `FinishReason` = `STOP/LENGTH/ABORT/ERROR/REPETITION` — `vllm/v1/engine/__init__.py:48-69`
+- `PauseMode = Literal["abort", "wait", "keep"]` (`vllm/v1/engine/__init__.py:32`)
+- `PauseState(IntEnum)` = `UNPAUSED=0`, `PAUSED_NEW=1`, `PAUSED_ALL=2` (`vllm/v1/core/sched/interface.py:24-35`)
+- `FinishReason` = `STOP/LENGTH/ABORT/ERROR/REPETITION` (`vllm/v1/engine/__init__.py:48-69`)
 
-### 4.2 `EngineCore.pause_scheduler` (in-proc) — `core.py:884-912`
+### 4.2 `EngineCore.pause_scheduler` (in-proc): `core.py:884-912`
 
 - validates mode (`:900-901`); **`mode="wait"` raises `ValueError("'wait' mode can't be used in inproc-engine mode")`** (`:902-903`)
 - `abort` → `scheduler.finish_requests(None, FINISHED_ABORTED)` (`:906`)
@@ -330,7 +330,7 @@ POST /update_weights  {"update_info": {...}}
 
 `InprocClient.sleep` likewise rejects `mode="wait"` (`core_client.py:405-407`).
 
-### 4.3 `EngineCoreProc.pause_scheduler` (multiprocess) — `core.py:1984-2026`
+### 4.3 `EngineCoreProc.pause_scheduler` (multiprocess): `core.py:1984-2026`
 
 - `abort` → finish all + `_send_abort_outputs` (`:2011-2015`)
 - `keep` → `PAUSED_ALL`; `wait`/`abort` → `PAUSED_NEW` (`:2017`)
@@ -338,7 +338,7 @@ POST /update_weights  {"update_info": {...}}
 - otherwise register idle callback and return a `Future` (`:2024-2026`); callbacks fire from `_process_input_queue` when `not has_work()` (`:1499-1501`, `_notify_idle_state_callbacks():1544-1547`)
 - `has_work()` = `engines_running or scheduler.has_requests() or batch_queue` (`:1457-1463`). **`has_work` is defined only on `EngineCoreProc`, not on base `EngineCore`.**
 
-**The actual drain predicate** is `Scheduler.get_num_unfinished_requests` — `scheduler.py:2665-2675`:
+**The actual drain predicate** is `Scheduler.get_num_unfinished_requests` (`scheduler.py:2665-2675`):
 
 ```python
 if self._pause_state == PauseState.PAUSED_ALL:  return 0        # :2666-2667
@@ -348,7 +348,7 @@ num_waiting = len(self.waiting) + len(self.skipped_waiting) - self.num_waiting_f
 
 With `PAUSED_NEW` (i.e. `mode="wait"`), `has_work()` stays `True` while RUNNING requests remain → the engine keeps stepping → they drain naturally → then `has_work()` goes `False` → idle callbacks fire → the pause `Future` resolves. `PAUSED_ALL` (i.e. `mode="keep"`) is idle immediately by construction.
 
-The other three pause gates: `token_budget = 0` under `PAUSED_ALL` (`scheduler.py:580-582`); the RUNNING loop `while req_index < len(self.running) and token_budget > 0` (`:625`); the WAITING gate `if not preempted_reqs and self._pause_state == PauseState.UNPAUSED` (`:868`) — so **both** `PAUSED_NEW` and `PAUSED_ALL` stop admitting WAITING requests.
+The other three pause gates: `token_budget = 0` under `PAUSED_ALL` (`scheduler.py:580-582`); the RUNNING loop `while req_index < len(self.running) and token_budget > 0` (`:625`); the WAITING gate `if not preempted_reqs and self._pause_state == PauseState.UNPAUSED` (`:868`). So **both** `PAUSED_NEW` and `PAUSED_ALL` stop admitting WAITING requests.
 
 **This `Future` is the drain primitive.** It crosses the process boundary because `EngineCoreProc._invoke_utility_method` defers the utility output until a returned `Future` completes (`core.py:1659-1672`, esp. `:1664-1668`).
 
@@ -360,7 +360,7 @@ Chain: `AsyncLLM.pause_generation` (`async_llm.py:914-957`) → `engine_core.pau
 
 > **Hazard (§0 fact 9):** `call_utility_async` has **no timeout** (`core_client.py:1236-1248`), and `SyncMPClient.call_utility` blocks on `future.result()` with no deadline (`:996-1002`). A drain that never reaches `not has_work()` blocks the HTTP handler indefinitely. `mode="wait"` is the worst case: `PAUSED_NEW` stops admitting but keeps stepping, so a request that cannot finish (e.g. a stop condition that never fires) hangs the pause forever.
 
-### 4.4 `_finish_pause` and `_reset_caches` — `core.py:861-882`
+### 4.4 `_finish_pause` and `_reset_caches`: `core.py:861-882`
 
 ```python
 def _reset_caches(self, reset_running_requests=True, reset_connector=True):
@@ -375,7 +375,7 @@ def _finish_pause(self, clear_cache: bool):
         self._reset_caches()
 ```
 
-### 4.5 `sleep` / `wake_up` / `resume` — `core.py:914-1006`
+### 4.5 `sleep` / `wake_up` / `resume`: `core.py:914-1006`
 
 - `resume_scheduler()` `:914-916` → `set_pause_state(UNPAUSED)` **only**.
 - `is_scheduler_paused()` `:918-920`.
@@ -387,21 +387,21 @@ def _finish_pause(self, clear_cache: bool):
 
 | Item | Anchor |
 |---|---|
-| `Executor.sleep(level)` | `vllm/v1/executor/abstract.py:347-359` — `collective_rpc("sleep", kwargs=dict(level=level))`, then `sleeping_tags |= SLEEP_TAGS` |
-| `Executor.wake_up(tags)` | `:359-382` — validates every tag against `sleeping_tags` before RPC (`:363-369`) |
-| `Executor.discard(tags)` | `:384-398` — `tags_to_discard = set(tags) - self.sleeping_tags` (`:385`) |
+| `Executor.sleep(level)` | `vllm/v1/executor/abstract.py:347-359`: `collective_rpc("sleep", kwargs=dict(level=level))`, then `sleeping_tags |= SLEEP_TAGS` |
+| `Executor.wake_up(tags)` | `:359-382`: validates every tag against `sleeping_tags` before RPC (`:363-369`) |
+| `Executor.discard(tags)` | `:384-398`: `tags_to_discard = set(tags) - self.sleeping_tags` (`:385`) |
 | `SLEEP_TAGS` | `:36` `frozenset(("weights", "kv_cache"))` |
 | `Executor.is_sleeping` | `:343-345` = `bool(self.sleeping_tags)` |
 
-> **Asymmetry worth knowing:** `Executor.sleep` marks **both** tags asleep regardless of level (`:354`), so after `sleep(level=1)` the executor reports `is_sleeping == True` and `wake_up(tags=["kv_cache"])` is accepted even though the KV cache was *discarded*, not offloaded — waking it merely re-maps empty memory.
+> **Asymmetry worth knowing:** `Executor.sleep` marks **both** tags asleep regardless of level (`:354`), so after `sleep(level=1)` the executor reports `is_sleeping == True` and `wake_up(tags=["kv_cache"])` is accepted even though the KV cache was *discarded*, not offloaded; waking it merely re-maps empty memory.
 | `SleepModeBackend(ABC)` | `vllm/device_allocator/sleep_mode_backend.py:37`; `suspend(level):53`, `resume(tags):63`, `state():71`, `discard(tags):76` |
 | capability probes | `is_supported:86`, `preserves_communicators:91`, `preserves_compiled_artifacts:97`, `preserves_graphs_with_communicators:103`, `supports_durable_storage:110` |
-| **`CuMemBackend.suspend` — the level switch is one line** | `:127-132`, esp. `:132 allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())` |
+| **`CuMemBackend.suspend`: the level switch is one line** | `:127-132`, esp. `:132 allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())` |
 | `CuMemBackend.resume` / `discard` | `:134-140` / `:142-147` |
 | `SleepModeBackendFactory` | `:155`; `register_backend:166`, `get_backend_class:178`, `create_backend:189` |
 | `SleepModeState` | `:34` `Literal["RUNNING","SUSPENDED","RESUMING"]` |
-| `GPUWorker.sleep(level)` | `vllm/v1/worker/gpu_worker.py:270-307` — level 2 pre-copies all params (`:276-283`) and buffers (`:284-287`) to CPU; then `sleep_mode_backend.suspend(level)` (`:289`). **No `mode` parameter** — mode is engine-level only |
-| `GPUWorker.wake_up(tags)` | `:309-336` — resume (`:310`), restore level-2 params/buffers only when `tags is None or "weights" in tags` (`:314-331`) |
+| `GPUWorker.sleep(level)` | `vllm/v1/worker/gpu_worker.py:270-307`: level 2 pre-copies all params (`:276-283`) and buffers (`:284-287`) to CPU; then `sleep_mode_backend.suspend(level)` (`:289`). **No `mode` parameter**: mode is engine-level only |
+| `GPUWorker.wake_up(tags)` | `:309-336`: resume (`:310`), restore level-2 params/buffers only when `tags is None or "weights" in tags` (`:314-331`) |
 | `GPUWorker.discard(tags)` | `:335-336` |
 | `CuMemAllocator.sleep(offload_tags)` | `vllm/device_allocator/cumem.py:227-...` |
 | `CuMemAllocator.discard(tags)` | `:294-322` |
@@ -409,20 +409,20 @@ def _finish_pause(self, clear_cache: bool):
 
 > **KV is never re-allocated on wake.** `EngineCore._initialize_kv_caches` runs only from `EngineCore.__init__` (`core.py:151`) → `model_executor.initialize_from_config` (`core.py:358`) → `GPUWorker.initialize_from_config` (`gpu_worker.py:774`) → `initialize_kv_cache` under the `"kv_cache"` mem-pool tag (`:794`). Wake restores the address range, not the contents.
 
-### 4.7 HTTP surface — `vllm/entrypoints/serve/dev/sleep/api_router.py`
+### 4.7 HTTP surface: `vllm/entrypoints/serve/dev/sleep/api_router.py`
 
 `POST /sleep?level=&mode=` `:21-27`; `POST /release_kv_cache_memory` `:30-33`; `POST /wake_up?tags=` `:36-44`; `GET /is_sleeping` `:47-50`. Sleep endpoints additionally require `--enable-sleep-mode` (`docs/features/sleep_mode.md:106`).
 
-### 4.8 Documented semantics vs. code — two discrepancies
+### 4.8 Documented semantics vs. code: two discrepancies
 
 1. `/pause` docstring says `clear_cache` is *"Ignored when mode='keep'"* (`rlhf/api_router.py:46-47`). The code **honours** it for `keep`: `_finish_pause(clear_cache)` runs on the idle callback for every mode (`core.py:2003-2009`, `:2017-2021`). Under `keep` + `clear_cache=True`, frozen requests are additionally preempted because `_reset_caches()` defaults `reset_running_requests=True` (`core.py:863`).
-2. `docs/training/async_rl.md:61` documents that with `clear_cache=False` *"some tokens in context may still reflect the old weights (stale KV cache)"* — an accepted hazard that RolloutCore must not rely on.
+2. `docs/training/async_rl.md:61` documents that with `clear_cache=False` *"some tokens in context may still reflect the old weights (stale KV cache)"*, an accepted hazard that RolloutCore must not rely on.
 
 ---
 
 ## 5. KV release and invalidation path
 
-### 5.1 `release_kv_cache_memory()` — `core.py:984-1002`
+### 5.1 `release_kv_cache_memory()`: `core.py:984-1002`
 
 ```python
 if not (self.is_scheduler_paused() and not self.scheduler.has_requests() and not self.batch_queue):
@@ -434,7 +434,7 @@ self.model_executor.discard(("kv_cache",))
 ```
 
 - Preconditions are **enforced**, not advisory.
-- Resets prefix/MM/encoder caches and discards only `"kv_cache"`-tagged allocations — **weights stay resident**. This is the "release KV between rollout steps without full sleep" primitive RFC #48311 refers to (`#46438` → `#44890`).
+- Resets prefix/MM/encoder caches and discards only `"kv_cache"`-tagged allocations: **weights stay resident**. This is the "release KV between rollout steps without full sleep" primitive RFC #48311 refers to (`#46438` → `#44890`).
 - **Does not exist on the worker or model runner.** Tree-wide it appears only at engine/dispatch level: `core.py:984`, `async_llm.py:1104-1109`, `llm_engine.py:381-383`, `core_client.py:201/296/411/1047/1294`, `entrypoints/llm.py:833`, `engine/protocol.py:196-199`, `dev/sleep/api_router.py:31`.
 - `AsyncLLM.release_kv_cache_memory` clears the MM cache first (`async_llm.py:1104-1106`) and records sleep state 0 (`:1108-1109`).
 - `Worker.sleep` also has no `mode`; `free_kv_cache` / `_free_kv_cache` / `_reshape_kv_cache` / `CumemAllocator` (lowercase) do **not** exist on this commit.
@@ -446,45 +446,45 @@ self.model_executor.discard(("kv_cache",))
 | `EngineCore.reset_prefix_cache(...) -> bool` | `core.py:834-839` |
 | `Scheduler.reset_prefix_cache(reset_running_requests=False, reset_connector=False) -> bool` | `scheduler.py:2706-2759`; aux-output guard `:2716-2725` (**raises `RuntimeError(... "pause(mode='keep')")`** unless `PAUSED_ALL`); preempts running in reverse order `:2734-2736`; `reset_successful = self.kv_cache_manager.reset_prefix_cache()` `:2744`; `reset_connector_cache()` `:2753-2754` |
 | `KVCacheManager.reset_prefix_cache() -> bool` | `vllm/v1/core/kv_cache_manager.py:664-679` → `coordinator.reset_prefix_cache()` (`kv_cache_coordinator.py:373-378`, `all(...)` across single-type managers) |
-| `BlockPool.reset_prefix_cache() -> bool` | `vllm/v1/core/block_pool.py:821-860` — **returns `False` while any non-null block is still in use** (`:831-838`, warns *"Failed to reset prefix cache because some blocks (%d) are not freed yet"*); on success replaces `cached_block_hash_to_block` and clears `cached_block_hashes_by_block` (`:840-842`), `block.reset_hash()` for every block (`:848-849`) |
+| `BlockPool.reset_prefix_cache() -> bool` | `vllm/v1/core/block_pool.py:821-860`: **returns `False` while any non-null block is still in use** (`:831-838`, warns *"Failed to reset prefix cache because some blocks (%d) are not freed yet"*); on success replaces `cached_block_hash_to_block` and clears `cached_block_hashes_by_block` (`:840-842`), `block.reset_hash()` for every block (`:848-849`) |
 
 > **Naming trap:** the *scheduler* parameter is `reset_connector`. `reset_external` exists **only** as the HTTP query param (`dev/cache/api_router.py:24`) and is passed **positionally** into the `reset_connector` slot (`:41-43`).
 >
 > `reset_connector_cache()` is a **no-op success** when no connector is configured (`scheduler.py:2762-2772`).
 >
-> `BlockPool.reset_prefix_cache` never zeroes KV contents and never touches `ref_cnt > 0` blocks — it only drops hash metadata, so subsequent lookups cannot hit.
+> `BlockPool.reset_prefix_cache` never zeroes KV contents and never touches `ref_cnt > 0` blocks; it only drops hash metadata, so subsequent lookups cannot hit.
 
 `BlockPool.reset_prefix_cache` docstring `:822-824`: *"This function may be used in RLHF flows to invalid prefix caching after the weights are updated."*
 
 ### 5.3 Other caches
 
-- `EngineCore.reset_encoder_cache()` — `core.py:841-859`: warns if requests are unfinished (`:850-854`); resets the scheduler's **logical** encoder cache (`:857`) and the GPU model runner's **physical** cache (`:858`). Docstring `:842-846` explicitly: *"This should be called when model weights are updated to ensure stale vision embeddings computed with old weights are not reused."*
-- `EngineCore.reset_mm_cache()` — `core.py:861-875` region; `AsyncLLM.reset_mm_cache` `async_llm.py:1078-1084` joins the MM warmup first (`:1080-1082`).
-- HTTP: `dev/cache/api_router.py` — `POST /reset_prefix_cache?reset_running_requests=&reset_external=` `:20-44` (returns `{"success": bool}`), `POST /reset_mm_cache` `:47-54`, `POST /reset_encoder_cache` `:57-64`.
-- `AsyncLLM.reset_prefix_cache` — `async_llm.py:1086-1091`.
+- `EngineCore.reset_encoder_cache()` (`core.py:841-859`): warns if requests are unfinished (`:850-854`); resets the scheduler's **logical** encoder cache (`:857`) and the GPU model runner's **physical** cache (`:858`). Docstring `:842-846` explicitly: *"This should be called when model weights are updated to ensure stale vision embeddings computed with old weights are not reused."*
+- `EngineCore.reset_mm_cache()` (`core.py:861-875` region); `AsyncLLM.reset_mm_cache` `async_llm.py:1078-1084` joins the MM warmup first (`:1080-1082`).
+- HTTP: `dev/cache/api_router.py`: `POST /reset_prefix_cache?reset_running_requests=&reset_external=` `:20-44` (returns `{"success": bool}`), `POST /reset_mm_cache` `:47-54`, `POST /reset_encoder_cache` `:57-64`.
+- `AsyncLLM.reset_prefix_cache` (`async_llm.py:1086-1091`).
 
-### 5.4 Cache identity — the core hazard (RFC #48312 category 7)
+### 5.4 Cache identity: the core hazard (RFC #48312 category 7)
 
-Block hash: `hash_block_tokens(hash_function, parent_block_hash, curr_block_token_ids, extra_keys)` — `vllm/v1/core/kv_cache_utils.py:649-679`; digest is `hash_function((parent_block_hash, curr_block_token_ids_tuple, extra_keys))` (`:677-679`).
+Block hash: `hash_block_tokens(hash_function, parent_block_hash, curr_block_token_ids, extra_keys)` (`vllm/v1/core/kv_cache_utils.py:649-679`); digest is `hash_function((parent_block_hash, curr_block_token_ids_tuple, extra_keys))` (`:677-679`).
 
-`extra_keys` is built by `generate_block_hash_extra_keys()` — `:610-646`:
+`extra_keys` is built by `generate_block_hash_extra_keys()` (`:610-646`):
 
 ```python
 extra_keys = lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys   # :639-641
 ```
 
-- `lora_extra_keys` = `[request.lora_request.lora_name]` — **name only**, no id, no version (`_gen_lora_extra_hash_keys():567-580`)
+- `lora_extra_keys` = `[request.lora_request.lora_name]`: **name only**, no id, no version (`_gen_lora_extra_hash_keys():567-580`)
 - `cache_salt_keys` = `[request.cache_salt]` **at block 0 only** (`:632-634`)
 - `mm_extra_keys` / `prompt_embeds_keys` = content hashes (`:627-630`, `:635-637`)
 
 **There is no model, adapter, target-model, draft-model or weight generation component in the cache key.** Consequences:
 
 - A weight update at constant token ids + cache salt produces **cache hits on stale KV**. Invalidation must be explicit.
-- A same-*name* adapter reload reuses stale blocks — the open bug tracked as `#42125` / `#44950`, and the most damaging failure class reported by the production RL operator in the #48312 thread.
-- `cache_salt` is the **only caller-controllable identity input** — and it *is* reachable from the OpenAI API: `chat_completion/protocol.py:456` (+ validator `:514-517`), `completion/protocol.py:200` (+ `:411-414`), `responses/protocol.py:255` (+ `:474-477`); it lands on `EngineCoreRequest.cache_salt:122` via `input_processor.py:483` and on `Request.cache_salt:185`.
+- A same-*name* adapter reload reuses stale blocks: the open bug tracked as `#42125` / `#44950`, and the most damaging failure class reported by the production RL operator in the #48312 thread.
+- `cache_salt` is the **only caller-controllable identity input**, and it *is* reachable from the OpenAI API: `chat_completion/protocol.py:456` (+ validator `:514-517`), `completion/protocol.py:200` (+ `:411-414`), `responses/protocol.py:255` (+ `:474-477`); it lands on `EngineCoreRequest.cache_salt:122` via `input_processor.py:483` and on `Request.cache_salt:185`.
   **This is a zero-diff defence:** salting every rollout with the weight version makes cross-version cache reuse impossible *by construction*, independent of whether `reset_prefix_cache` succeeded.
 - **LoRA caches are keyed by adapter *id* only, with no version.** `LRUCacheLoRAModelManager.add_adapter` merely LRU-touches an already-registered adapter (`vllm/lora/model_manager.py:1350-1360`); `WorkerLoRAManager.add_adapter` reloads only when `lora_request.lora_int_id not in self.list_adapters() or lora_request.load_inplace` (`vllm/lora/worker_manager.py:298-301`). `LoRARequest.load_inplace` (`vllm/lora/request.py:29`) is the *only* reload escape hatch, and `LoRARequest.__eq__`/`__hash__` are by `lora_name` alone (`:67-83`). Nothing in `vllm/lora/` invalidates prefix / MM / encoder caches.
-- **MM processor and encoder caches carry no weight generation either.** The MM processor cache key is `model_id` + item content + processor kwargs (`vllm/multimodal/processing/inputs.py:95-102`), where `model_id` is `model_config.model` — a name/path (`multimodal/processing/context.py:367-369`). The encoder cache is `dict[mm_hash, Tensor]` (`vllm/v1/worker/gpu/mm/encoder_cache.py:8-13`). `MultiModalFeatureSpec.identifier` (`multimodal/inputs.py:363-364`) adds a LoRA prefix **name only** via `input_processor.py:248-263`; the P1 receiver cache key deliberately *excludes* LoRA, using `feature.mm_hash` (`multimodal/cache/base.py:447-456`).
+- **MM processor and encoder caches carry no weight generation either.** The MM processor cache key is `model_id` + item content + processor kwargs (`vllm/multimodal/processing/inputs.py:95-102`), where `model_id` is `model_config.model`, a name/path (`multimodal/processing/context.py:367-369`). The encoder cache is `dict[mm_hash, Tensor]` (`vllm/v1/worker/gpu/mm/encoder_cache.py:8-13`). `MultiModalFeatureSpec.identifier` (`multimodal/inputs.py:363-364`) adds a LoRA prefix **name only** via `input_processor.py:248-263`; the P1 receiver cache key deliberately *excludes* LoRA, using `feature.mm_hash` (`multimodal/cache/base.py:447-456`).
 
 **Per-operation invalidation summary (definitive):**
 
@@ -494,14 +494,14 @@ extra_keys = lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_k
 | `pause_scheduler(..., clear_cache=False)` | No | `core.py:881-882` |
 | `sleep(level>=1)` | **Yes** (via pause; `clear_prefix_cache = level >= 1`) | `core.py:936-937` |
 | `sleep(level=0)` | No | `core.py:936-939` |
-| `wake_up(tags)` | **No** — re-maps memory + resumes scheduler only | `core.py:960-982` |
-| `release_kv_cache_memory()` | **Yes** — explicit `_reset_caches()` + `discard(("kv_cache",))` | `core.py:1001-1002` |
+| `wake_up(tags)` | **No**: re-maps memory + resumes scheduler only | `core.py:960-982` |
+| `release_kv_cache_memory()` | **Yes**: explicit `_reset_caches()` + `discard(("kv_cache",))` | `core.py:1001-1002` |
 | `resume_scheduler()` | No | `core.py:914-916` |
 | `finish_weight_update()` | **No** | `async_llm.py:1284-1288`; `gpu_worker.py:1488-1505` |
 
-### 5.5 `#48762` — the encoder-cache fix that did **not** land
+### 5.5 `#48762`: the encoder-cache fix that did **not** land
 
-`vllm-project/vllm#48762` — *"[Bugfix][V1] Invalidate encoder cache on finish_weight_update"* — GitHub state `closed`, `merged_at: null`, closed 2026-07-17. Consistent with the code: `finish_weight_update` still invalidates no KV, encoder or multimodal cache (its only cleanup is `reset_lora_state()`). RFC #48312 lists this as an exit criterion (*"#48762 or an equivalent non-reverted fix lands"*).
+`vllm-project/vllm#48762`: *"[Bugfix][V1] Invalidate encoder cache on finish_weight_update"*, GitHub state `closed`, `merged_at: null`, closed 2026-07-17. Consistent with the code: `finish_weight_update` still invalidates no KV, encoder or multimodal cache (its only cleanup is `reset_lora_state()`). RFC #48312 lists this as an exit criterion (*"#48762 or an equivalent non-reverted fix lands"*).
 
 ---
 
@@ -509,24 +509,24 @@ extra_keys = lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_k
 
 ### 6.1 Output dataclasses
 
-**`EngineCoreOutput`** — `vllm/v1/engine/__init__.py:199` (`msgspec.Struct`, `array_like`):
+**`EngineCoreOutput`** (`vllm/v1/engine/__init__.py:199`) (`msgspec.Struct`, `array_like`):
 `request_id:205`, `new_token_ids:206`, `new_logprobs:208` (`LogprobsLists|None`), `new_prompt_logprobs_tensors:209` (`LogprobsTensors|None`), `pooling_output:211`, `finish_reason:213`, `stop_reason:214`, `events:215`, `kv_transfer_params:216`, `ec_transfer_params:217`, `trace_headers:219`, `prefill_stats:221`, `routed_experts:223` (`np.ndarray|None`), `num_nans_in_logits:226`, `mm_cache_miss_hashes:231`, `new_sampling_mask:233`, `spec_decode_metrics:237`; `finished` property `:239-241`.
 
-**`EngineCoreOutputs`** — `:256`: `engine_index:265`, `outputs:268`, `scheduler_stats:269`, `timestamp:270`, `utility_output:272`, `finished_requests:273`, `wave_complete:277`, `start_wave:280`.
+**`EngineCoreOutputs`** (`:256`): `engine_index:265`, `outputs:268`, `scheduler_stats:269`, `timestamp:270`, `utility_output:272`, `finished_requests:273`, `wave_complete:277`, `start_wave:280`.
 
-**`CompletionOutput`** — `vllm/outputs.py:33` (`@dataclass`): `index:59`, `text:60`, `token_ids:61`, `cumulative_logprob:62`, `logprobs:63`, `routed_experts:64` (`np.ndarray|None  # [seq_len,layer_num,topk]`), `finish_reason:65`, `stop_reason:66`, `lora_request:67`, `sampling_mask:68`, `spec_decode_metrics:69`.
+**`CompletionOutput`** (`vllm/outputs.py:33`) (`@dataclass`): `index:59`, `text:60`, `token_ids:61`, `cumulative_logprob:62`, `logprobs:63`, `routed_experts:64` (`np.ndarray|None  # [seq_len,layer_num,topk]`), `finish_reason:65`, `stop_reason:66`, `lora_request:67`, `sampling_mask:68`, `spec_decode_metrics:69`.
 
-**`RequestOutput`** — `vllm/outputs.py:108`, explicit `__init__:136-174`: `request_id:161`, `prompt:162`, `prompt_token_ids:163`, `prompt_logprobs:164`, `outputs:165`, `finished:166`, `metrics:167`, `lora_request:168`, `encoder_prompt:169`, `encoder_prompt_token_ids:170`, `num_cached_tokens:171`, `num_cache_creation_tokens:172`, `kv_transfer_params:173`, `ec_transfer_params:174` (the latter two keyword-only, `:151-152`).
+**`RequestOutput`** (`vllm/outputs.py:108`), explicit `__init__:136-174`: `request_id:161`, `prompt:162`, `prompt_token_ids:163`, `prompt_logprobs:164`, `outputs:165`, `finished:166`, `metrics:167`, `lora_request:168`, `encoder_prompt:169`, `encoder_prompt_token_ids:170`, `num_cached_tokens:171`, `num_cache_creation_tokens:172`, `kv_transfer_params:173`, `ec_transfer_params:174` (the latter two keyword-only, `:151-152`).
 
 ### 6.2 The definitive metadata answer
 
 - **No generic metadata bag exists end-to-end.**
-- `RequestOutput.__init__` has `**kwargs: Any` at `outputs.py:155` — forward-compat tolerance only:
+- `RequestOutput.__init__` has `**kwargs: Any` at `outputs.py:155`: forward-compat tolerance only:
   ```python
   if kwargs:
       logger.warning_once("RequestOutput: Ignoring extra arguments: %s", str(kwargs))   # :157-160
   ```
-- The only free-form dicts are `kv_transfer_params` / `ec_transfer_params` — **connector-specific**, populated from exactly two hard-coded `SamplingParams.extra_args` keys:
+- The only free-form dicts are `kv_transfer_params` / `ec_transfer_params`: **connector-specific**, populated from exactly two hard-coded `SamplingParams.extra_args` keys:
   - `vllm/v1/request.py:119-128` extracts `kv_transfer_params`, `ec_transfer_params`, `kv_cache_report_mode`
   - `vllm/v1/engine/output_processor.py:238-245` reads only `extra_args["kv_transfer_params"]["do_remote_prefill"]` / `remote_prefill_cached_tokens`
 - `trace_headers: Mapping[str, str]` is a verbatim caller pass-through (`EngineCoreRequest:142` → `Request:196` → `EngineCoreOutput:219` → `output_processor.py:805`) but is consumed **only** by OpenTelemetry and never reaches a response.
@@ -537,10 +537,10 @@ extra_keys = lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_k
 |---|---|
 | `vllm_xargs: dict[str, str \| int \| float \| list[...]] \| None` | chat `chat_completion/protocol.py:482`; completion `completion/protocol.py:226`; responses `responses/protocol.py:290`; anthropic `anthropic/protocol.py:164`; transcription `vllm/entrypoints/speech_to_text/transcription/protocol.py:116`; translation `vllm/entrypoints/speech_to_text/translation/protocol.py:163` |
 | → `SamplingParams.extra_args` | chat `protocol.py:703` + `:743`; completion `protocol.py:365,368-372`; responses `protocol.py:433,435-438` |
-| Declaration | `vllm/sampling_params.py:343` — *"Arbitrary additional args, that can be used by custom sampling implementations, plugins, etc. Not used by any in-tree sampling implementations."* |
+| Declaration | `vllm/sampling_params.py:343`: *"Arbitrary additional args, that can be used by custom sampling implementations, plugins, etc. Not used by any in-tree sampling implementations."* |
 | Validation | `SamplingParams._verify_extra_args()` `sampling_params.py:670-681`, invoked `:557-558` (recursive JSON-primitive + int64-range check) |
 
-**Arbitrary `vllm_xargs` keys reach `SamplingParams.extra_args` and stop there** — they are never surfaced in `RequestOutput` / `CompletionOutput`. There is **no server-side `extra_body`** (`extra_body` appears only in client-side benchmark code under `vllm/benchmarks/`).
+**Arbitrary `vllm_xargs` keys reach `SamplingParams.extra_args` and stop there**. They are never surfaced in `RequestOutput` / `CompletionOutput`. There is **no server-side `extra_body`** (`extra_body` appears only in client-side benchmark code under `vllm/benchmarks/`).
 
 ### 6.4 Where `RequestOutput` is assembled
 
@@ -553,16 +553,16 @@ extra_keys = lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_k
 | `RequestState` | `:134`; fields `:159-195` (incl. `logprobs_processor:172`, `detokenizer:173`, `routed_experts_chunks:190`, `sampling_mask_chunks:191`, `sent_tokens_offset:195`) |
 | `RequestState.from_new_request` | `:222-297`; `kv_transfer_params` read `:238-245`; `LogprobsProcessor.from_new_request:252`; `IncrementalDetokenizer.from_new_request:256`; `external_req_id` assert `:274` |
 | `make_request_output` | `:299-363`; FINAL_ONLY gating `:309-313`; DELTA slicing `:330-336`; parent merge `:352` |
-| **`_new_request_output` — `RequestOutput(...)` constructed** | `:365-409` (call `:396-409`) |
-| **`_new_completion_output` — `CompletionOutput(...)`** | `:411-459` (incl. `routed_experts` `:443-445`, `:451`) |
+| **`_new_request_output`: `RequestOutput(...)` constructed** | `:365-409` (call `:396-409`) |
+| **`_new_completion_output`: `CompletionOutput(...)`** | `:411-459` (incl. `routed_experts` `:443-445`, `:451`) |
 | `OutputProcessor` | `:464`; `request_states:479`, `parent_requests:480`, `external_req_ids:481` |
 | `abort_requests` | `:512-574` (final `FinishReason.ABORT` output `:551-565`) |
 | `add_request` | `:576-606` |
-| **`process_outputs` — the single batch loop** | `:641-770`; per-output body `:669-770`; `:685-686` params; `:687-690` routed experts; `:715-720` stop strings; `:724` logprobs; `:727-734` request output; `:738-740` queue put |
+| **`process_outputs`: the single batch loop** | `:641-770`; per-output body `:669-770`; `:685-686` params; `:687-690` routed experts; `:715-720` stop strings; `:724` logprobs; `:727-734` request output; `:738-740` queue put |
 | `_finish_request` | `:772-785` |
 | `do_tracing` (only `trace_headers` consumer) | `:794`, `:805` |
 
-`RequestOutput.add()` — `outputs.py:176-208` — merges streaming deltas; `:197-200` explicitly preserves `routed_experts` with the comment *"R3 is returned on the terminal output and must survive aggregation with earlier chunks that have no R3."*
+`RequestOutput.add()` (`outputs.py:176-208`) merges streaming deltas; `:197-200` explicitly preserves `routed_experts` with the comment *"R3 is returned on the terminal output and must survive aggregation with earlier chunks that have no R3."*
 
 ---
 
@@ -626,16 +626,16 @@ Async D2H variant: `AsyncGPUModelRunnerOutput` (`gpu_model_runner.py:281`, `:312
 | Types | `vllm/logprobs.py:13 Logprob`, `:32 FlatLogprobs`, `:160 PromptLogprobs`, `:162 SampleLogprobs`, `:165 create_prompt_logprobs`, `:173 create_sample_logprobs` |
 | OpenAI conversion | `chat_completion/serving.py:629-642`, `:1175`, `:1219` |
 
-Containers: `LogprobsLists` (`vllm/v1/outputs.py:34` — `logprob_token_ids:36`, `logprobs:38`, `sampled_token_ranks:40`, `cu_num_generated_tokens:45`, `slice_request():47`); `LogprobsTensors` (`:83` — `:85/:87/:89/:91/:95`; `tolists():97`, `to_cpu_nonblocking():110`, `filter():124`, `cat():139`, `empty_cpu():168`).
+Containers: `LogprobsLists` (`vllm/v1/outputs.py:34`: `logprob_token_ids:36`, `logprobs:38`, `sampled_token_ranks:40`, `cu_num_generated_tokens:45`, `slice_request():47`); `LogprobsTensors` (`:83`: `:85/:87/:89/:91/:95`; `tolists():97`, `to_cpu_nonblocking():110`, `filter():124`, `cat():139`, `empty_cpu():168`).
 
 Detokenizer owns **text only**: `IncrementalDetokenizer` (`vllm/v1/engine/detokenizer.py:31`; `token_ids:33`, `output_token_ids:36`, `update():42-44`/`:96`, `get_next_output_text():148`; `FastIncrementalDetokenizer:166`, `SlowIncrementalDetokenizer:249`). `LogprobsProcessor` decodes logprob token ids independently (`logprobs.py:96-98`, `:145-147`, `_correct_decoded_token:249`).
 
 ### 7.4 Two RL-relevant features that ARE landed
 
-**(a) Trace replay — `trace_decode_token_ids`.** PR #46701, merged 2026-08-20.
+**(a) Trace replay: `trace_decode_token_ids`.** PR #46701, merged 2026-08-20.
 
-- `SamplingParams.trace_decode_token_ids: list[int] | None` — `sampling_params.py:374`; docstring `:375-377`: *"forces the engine to emit this predetermined sequence of token IDs during decoding instead of sampling randomly. Real logprobs are still computed."*
-- Validation `_validate_trace_decode_token_ids():956-1001` — `n=1` required (`:962`), rejects `prompt_logprobs` (`:970`), speculative decoding (`:974`), structured outputs (`:978`), repetition detection (`:982`), thinking budget (`:986`), bad words (`:989`).
+- `SamplingParams.trace_decode_token_ids: list[int] | None` (`sampling_params.py:374`); docstring `:375-377`: *"forces the engine to emit this predetermined sequence of token IDs during decoding instead of sampling randomly. Real logprobs are still computed."*
+- Validation `_validate_trace_decode_token_ids():956-1001`: `n=1` required (`:962`), rejects `prompt_logprobs` (`:970`), speculative decoding (`:974`), structured outputs (`:978`), repetition detection (`:982`), thinking budget (`:986`), bad words (`:989`).
 - Gate: `ModelConfig.enable_trace_replay: bool = False` (`vllm/config/model.py:276`; doc `:277-281`), CLI `--enable-trace-replay` (`arg_utils.py:951-953`, field `:586`), **requires Model Runner V2** (`config/vllm.py:1262-1267`, raises `:1266`: *"trace replay requires Model Runner V2"*).
 - Admission `input_processor.py:205-227` (truncate to `max_model_len - prompt_len`, `max_tokens = min(len(trace), max_tokens)` `:219-221`, `min_tokens=0` `:222`, `ignore_eos=True` `:223`, clear stops `:225-227`), invoked `:430-431`; hard error without the flag `:168-176`.
 - Runtime: `TraceReplayState` (`vllm/v1/worker/gpu/sample/trace_replay.py:11`), `StagedWriteTensor:26-31`, `add_request:34`, `apply_staged_writes:42`, `apply_trace:46`, Triton kernel `_trace_replay_kernel:61-92`.
@@ -646,19 +646,19 @@ Detokenizer owns **text only**: `IncrementalDetokenizer` (`vllm/v1/engine/detoke
       # computed logprobs reflect the real distribution of the forced token.
       self.trace_replay_state.apply_trace(sampled, idx_mapping)
   ```
-  applied **before** logprob computation (`:171-188`) — this is what makes the logprobs "real".
+  applied **before** logprob computation (`:171-188`). This is what makes the logprobs "real".
 
 **(b) Routed experts / R3.** Landed end-to-end and reaches the client.
 
 - Config: `AuxOutputConfig.enable_return_routed_experts: bool = False` (`vllm/config/aux_output.py:14`), `max_bytes:17`, `enabled` property `:21-23`, `compute_hash:25-30`; `VllmConfig.aux_output_config` (`config/vllm.py:380`); CLI `--enable-return-routed-experts` (`arg_utils.py:453`, `:831-832`); `LLM(enable_return_routed_experts=...)` (`entrypoints/llm.py:206`, `:322`).
 - Per-request: `SamplingParams.routed_experts_prompt_start:367` (validated `input_processor.py:404-410`); API fields chat `protocol.py:426` / completion `protocol.py:179`.
 - Capture: `RoutedExpertsCapturer` (`vllm/model_executor/layers/fused_moe/routed_experts_capturer.py:43`; `capture():86`, `snapshot_routing_data():184`, `bind_routed_experts_capturer():189`); bound `vllm/distributed/aux_output_connector/worker.py:94-97`.
-- Transport is **not** the token IPC path — a block-hash-keyed shared store: `vllm/distributed/aux_output_connector/` (`connector.py:34 AuxRequestOutput`, `:39 AuxOutputSchedulerConnector`, `:48 build_connector_meta`, `:98 take_output`, `:140 request_finished`; `routed_experts.py:162/:169/:182`; `store.py`).
+- Transport is **not** the token IPC path; a block-hash-keyed shared store: `vllm/distributed/aux_output_connector/` (`connector.py:34 AuxRequestOutput`, `:39 AuxOutputSchedulerConnector`, `:48 build_connector_meta`, `:98 take_output`, `:140 request_finished`; `routed_experts.py:162/:169/:182`; `store.py`).
 - Scheduler: connector constructed `scheduler.py:395-397`; metadata `:1493-1496`; `take_output` `:2088-2095`; `EngineCoreOutput(routed_experts=...)` `:2170`.
 - Frontend: `output_processor.py:190` chunks, `:687-690` append, `:443-445` concat on finish, `:451` into `CompletionOutput`.
 - API (base64): `chat_completion/serving.py:1082-1084`, `:1103`; field `chat_completion/protocol.py:124`; completion `completion/serving.py:571-573`, `:590`, field `completion/protocol.py:655`.
 
-### 7.5 DSA indexer top-k — **NOT PRESENT as a return-to-user feature**
+### 7.5 DSA indexer top-k: **NOT PRESENT as a return-to-user feature**
 
 - `indexer_topk` is only a **kernel backend selector**: `SparseIndexerTopkBackend = Literal[...]` (`vllm/config/kernel.py:159`), `sparse_indexer_topk_backend:278`, validator `:343-345`; CLI `--sparse-indexer-topk-backend` (`arg_utils.py:1722-1725`); `get_indexer_topk()` (`vllm/model_executor/layers/indexer_topk.py:139`).
 - `enable_return_indexer_topk` / `return_indexer_topk` / the symbol `dsa_index`: **NOT PRESENT on main@00b7847c**.
@@ -668,7 +668,7 @@ Detokenizer owns **text only**: `IncrementalDetokenizer` (`vllm/v1/engine/detoke
 
 ## 8. Existing RL examples, tests and CI
 
-### 8.1 Examples — `examples/rl/` (11 files, all verified)
+### 8.1 Examples: `examples/rl/` (11 files, all verified)
 
 | File | Scenario | Backend | Lifecycle APIs used |
 |---|---|---|---|
@@ -680,9 +680,9 @@ Detokenizer owns **text only**: `IncrementalDetokenizer` (`vllm/v1/engine/detoke
 | `rlhf_sparse_nccl.py` (253 L) | checkpoint-coordinate sparse patches, Qwen3 MoE TP2/EP2 | `sparse_nccl` (`:175`) | `llm.sleep.remote(level=0):221`, `llm.wake_up.remote(tags=["scheduling"]):225` |
 | `rlhf_sharded_rdt_small_ep.py` (270 L) | CI-sized sharded_rdt: 2 FSDP2 → 2 DP+EP | `sharded_rdt` | pause/resume `:236,240,248,252`; asserts generation **changed** on sync 0 and **stable** on replay sync 1 (`:256-263`) |
 | `rdt_vllm_serve.py` (152 L) | driver helpers | `sharded_rdt` (`:58-59`) | `launch_vllm_serve:25`, `/pause:139`, `/resume:143`; `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1:79` |
-| `rdt_weight_source.py` (92 L) | fused → per-expert checkpoint names | — | `CheckpointNameSource(WeightSource):24` |
-| `routed_experts_e2e.py` (383 L) | routed-experts capture (not weight transfer) | — | `enable_return_routed_experts=True:139-146` |
-| `skip_loading_weights_in_engine_init.py` (53 L) | dummy → auto reload offline | — | `collective_rpc("update_config",...)`:40-42; `collective_rpc("reload_weights")`:44 |
+| `rdt_weight_source.py` (92 L) | fused → per-expert checkpoint names | (none) | `CheckpointNameSource(WeightSource):24` |
+| `routed_experts_e2e.py` (383 L) | routed-experts capture (not weight transfer) | (none) | `enable_return_routed_experts=True:139-146` |
+| `skip_loading_weights_in_engine_init.py` (53 L) | dummy → auto reload offline | (none) | `collective_rpc("update_config",...)`:40-42; `collective_rpc("reload_weights")`:44 |
 
 Related examples elsewhere: `examples/features/pause_resume/pause_resume_offline.py` (`:66`, `:74`), `examples/features/pause_resume/data_parallel_pause_resume.py` (`/pause:42`, `/resume:50`), `examples/features/reset_kv/reset_kv_offline.py:62` (`reset_prefix_cache(reset_running_requests=True)`), `examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py:194`.
 
@@ -699,16 +699,16 @@ Related examples elsewhere: `examples/features/pause_resume/pause_resume_offline
 - `tests/v1/worker/test_gpu_worker_weight_transfer.py`: `:75`, `:85`, `:101`, `:125`, `:139`, `:171`, `:183`, `:190`, `:196`, `:202`, `:215`.
 - `tests/entrypoints/weight_transfer/test_weight_transfer_llm.py`: `:105`, `:122`, `:175`, **`test_full_weight_transfer_flow:241`** (asserts version `"default"` `:237` → `"step-42"` `:292`; `update_weight_version("manual-version")` `:294`), `:320`.
 
-**RLHF dev endpoints** — `tests/entrypoints/serve/dev/rlhf/` contains only `conftest.py` + `state_transitions/test_pause_resume.py`.
+**RLHF dev endpoints**: `tests/entrypoints/serve/dev/rlhf/` contains only `conftest.py` + `state_transitions/test_pause_resume.py`.
 - `conftest.py`: DEV_MODE gate `:96`; base args include `--enable-sleep-mode` (`:42`/`:58`); helpers `poll_until:146`, `gen:176`, `gen_with_logprobs:194`, `stream_completion:243`, `start_stream:276`, `pause:304`, `resume:312`, `completion_with_cache_details:316`, `golden_output:332`, `cached_tokens:344`, `sleep:353`, `wake:359`, `is_sleeping:364`, `is_paused:368`, `health:372`, `start_weight_update:384`, `finish_weight_update:392`, `get_world_size:396`, `gpu_free_bytes:409`, `sleep_metrics:422`.
 - **Only `/pause`, `/resume`, `/is_paused`, `/v1/completions`, `/health` are actually called** by test code. `sleep`/`wake`/`is_sleeping`/`start_weight_update`/`finish_weight_update`/`get_world_size`/`sleep_metrics`/`gpu_free_bytes`/`poll_until` have **no importers** -- checked by import, because a bare-name grep is false here (`sleep` and `get_world_size` name unrelated functions elsewhere in the tree).
-- `state_transitions/test_pause_resume.py` (168 L): parametrized MRV1/MRV2 (`:27-35`); `TestPauseResume:57`; `test_state_and_idempotency_across_cycles:58` (abort/wait/keep `:66`); `test_invalid_mode_preserves_state:75` (400 + `error.param == "query.mode"` `:86-87`); **`test_mode_request_lifecycle:100`** — the reference oracle for drain semantics (abort/wait ⇒ in-flight finished `:120-121`; keep ⇒ no new chunks until resume `:122-127`; new request must not complete while paused `:129-132`); `test_clear_cache_preserves_output_and_controls_prefix_cache:145` (cached_tokens 0 → >0 → preserved → 0, `:155-168`).
+- `state_transitions/test_pause_resume.py` (168 L): parametrized MRV1/MRV2 (`:27-35`); `TestPauseResume:57`; `test_state_and_idempotency_across_cycles:58` (abort/wait/keep `:66`); `test_invalid_mode_preserves_state:75` (400 + `error.param == "query.mode"` `:86-87`); **`test_mode_request_lifecycle:100`**: the reference oracle for drain semantics (abort/wait ⇒ in-flight finished `:120-121`; keep ⇒ no new chunks until resume `:122-127`; new request must not complete while paused `:129-132`); `test_clear_cache_preserves_output_and_controls_prefix_cache:145` (cached_tokens 0 → >0 → preserved → 0, `:155-168`).
 
 **Sleep / wake**
 - `tests/entrypoints/serve/dev/test_sleep.py`: `test_release_kv_cache_memory_route:20` (mocked engine), `test_sleep_mode:35` (DEV_MODE `:50`; `/sleep:52`, `/is_sleeping:54/:68/:90/:99`, `/metrics:59`, `/wake_up:66`, partial wakes `:85`, `:95`).
 - `tests/basic_correctness/test_mem.py`: **`test_release_kv_cache_memory_preserves_generation:114`** (params `["kv-only","sleep-1","sleep-2"]:112`), `test_sleep_with_only_weights_asleep:173`, `test_discard_tags:207`, `test_level2_discards_ordinary_tensor_with_weights_tag:242`, `test_deep_sleep:367`, `test_deep_sleep_lora:398`, `:449`, `test_deep_sleep_async:491`, `:530`, `:571`.
 - `tests/v1/worker/test_sleep_mode_backend.py`: `:19`, `:25`, `:36`, `:42`, `:91`, `:96`, `:105`, `:121`.
-- `tests/model_executor/test_sleep_mode_tensor_ownership.py::test_static_model_tensors_survive_level2_restore:261` (marked `slow_test:258` — **no CI lane runs it**).
+- `tests/model_executor/test_sleep_mode_tensor_ownership.py::test_static_model_tensors_survive_level2_restore:261` (marked `slow_test:258`: **no CI lane runs it**).
 - `tests/models/language/generation/test_gdn_sleep_wake.py:35`.
 
 **Pause / resume / drain**
@@ -722,7 +722,7 @@ Related examples elsewhere: `examples/features/pause_resume/pause_resume_offline
 
 **End-to-end RL loop test (rollout → update → rollout): NOT PRESENT as a pytest test.** The nearest artifacts are CI-executed examples: `rlhf_sharded_rdt_small_ep.py:256-263` and `rlhf_async_new_apis.py:278-361`.
 
-### 8.3 CI — no dedicated RL lane
+### 8.3 CI: no dedicated RL lane
 
 No `RL`/`RLHF`/`Weight Transfer` *group* exists (`.buildkite/test_areas/*.yaml`). `.buildkite/test-pipeline.yaml:1-7` is deprecated. `.github/workflows/` has no RL job.
 
@@ -753,24 +753,24 @@ Consistent with RFC #48311 / #48305 listing the "RL CI matrix" (`#45585`) as an 
 | `docs/serving/online_serving/README.md` | dev mode `:167`; **Weight Transfer APIs (RL Training) `:178-193`**; Sleep Mode APIs `:200-205`; Collective RPC `:195-197` |
 | `docs/usage/security.md` | dev-endpoint list `:226-238`; *"CRITICAL: Never set `VLLM_SERVER_DEV_MODE=1` in production"* `:262` |
 
-**R3 / routed-experts docs: NOT PRESENT** — zero matches for `routed_experts` / `enable_return_routed_experts` / `\bR3\b` under `docs/**/*.md`.
+**R3 / routed-experts docs: NOT PRESENT**: zero matches for `routed_experts` / `enable_return_routed_experts` / `\bR3\b` under `docs/**/*.md`.
 
 ### 8.5 Environment gating
 
 | Var | Anchor | Effect |
 |---|---|---|
-| `VLLM_SERVER_DEV_MODE` | declared `vllm/envs.py:169`; accessor `:1435` `bool(int(os.getenv("VLLM_SERVER_DEV_MODE","0")))` | **the only gate** for all RL/sleep/cache/rpc dev endpoints — `routers.py:34-38` |
+| `VLLM_SERVER_DEV_MODE` | declared `vllm/envs.py:169`; accessor `:1435` `bool(int(os.getenv("VLLM_SERVER_DEV_MODE","0")))` | **the only gate** for all RL/sleep/cache/rpc dev endpoints: `routers.py:34-38` |
 | `--enable-sleep-mode` | `docs/features/sleep_mode.md:106` | additionally required for `/sleep`, `/wake_up`, `/is_sleeping`, `/release_kv_cache_memory` |
 | `VLLM_ALLOW_INSECURE_SERIALIZATION` | `ipc_engine.py:87`; example usage `rlhf_http_ipc.py:57`, `:90` | required for IPC packed/pickled handles |
 | `VLLM_PLUGINS` | `vllm/envs.py:116`, `:1157-1160` | allowlist for plugin groups; **endpoint plugins are only loaded when explicitly named** (`plugins/__init__.py:122-131`) |
 | `VLLM_USE_V2_MODEL_RUNNER` | `vllm/envs.py:302` | selects Model Runner V2 (required by trace replay) |
-| `VLLM_ALLOW_INSECURE_SERIALIZATION` | — | also needed by `/collective_rpc`-style arbitrary callable invocation |
+| `VLLM_ALLOW_INSECURE_SERIALIZATION` | (none found) | also needed by `/collective_rpc`-style arbitrary callable invocation |
 
 ### 8.6 Domain vocabulary
 
 - **`trajectory`: NOT PRESENT** in `vllm/`.
-- **`rollout`: no abstraction** — comment-only hits (`vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py:2522`, `vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py:655`, `routed_experts_capturer.py:154`).
-- **`policy`: no RL policy model** — all `*Policy` classes are cache/scheduling/EPLB.
+- **`rollout`: no abstraction**, comment-only hits (`vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py:2522`, `vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py:655`, `routed_experts_capturer.py:154`).
+- **`policy`: no RL policy model**. All `*Policy` classes are cache/scheduling/EPLB.
 - **`trainer`: real but only weight-transfer trainer-side engines** (`base.py:276`, `:551`; `factory.py:124`; per-backend trainer classes). No optimizer or training loop.
 
 **vLLM has no rollout/trajectory/policy/trainer domain model on main@00b7847c.** RL exists only as (a) the weight-transfer subsystem, (b) pause/resume + sleep lifecycle APIs, (c) routed-experts capture, (d) docs describing external trainers.
@@ -779,19 +779,19 @@ Consistent with RFC #48311 / #48305 listing the "RL CI matrix" (`#45585`) as an 
 
 ## 9. The smallest places RolloutCore would need to integrate
 
-### 9.1 Preferred: **zero-diff** — plugin package + existing dev endpoints
+### 9.1 Preferred: **zero-diff**, plugin package + existing dev endpoints
 
-**(a) HTTP surface — `vllm.endpoint_plugins`** (use only if new routes are genuinely needed)
+**(a) HTTP surface: `vllm.endpoint_plugins`** (use only if new routes are genuinely needed)
 
-- Contract: `EndpointPlugin` Protocol — `vllm/plugins/endpoint_plugins/interface.py:44`; members `name:52`, `required_tasks:55`, `attach_router(app):63`, `init_state(engine_client, state, args):72`.
-- Discovery/gating: `load_endpoint_plugins()` — `vllm/plugins/__init__.py:93-159`; **must be named in `VLLM_PLUGINS`** (`:122-131`); `required_tasks` must intersect the server's supported tasks (`:143-154`). `SupportedTask = Literal[GenerationTask, PoolingTask, FrontendTask]` (`vllm/tasks.py:43`).
+- Contract: `EndpointPlugin` Protocol (`vllm/plugins/endpoint_plugins/interface.py:44`); members `name:52`, `required_tasks:55`, `attach_router(app):63`, `init_state(engine_client, state, args):72`.
+- Discovery/gating: `load_endpoint_plugins()` (`vllm/plugins/__init__.py:93-159`); **must be named in `VLLM_PLUGINS`** (`:122-131`); `required_tasks` must intersect the server's supported tasks (`:143-154`). `SupportedTask = Literal[GenerationTask, PoolingTask, FrontendTask]` (`vllm/tasks.py:43`).
 - Wiring: `attach_endpoint_plugins(app, supported_tasks)` (`launchers/app.py:51`, attached **last** so routes can shadow core ones) and `init_endpoint_plugins_state(...)` (`launchers/api_server/app_state.py:159`).
 - Documented constraint (`interface.py:6-16`, `:75-79`): reach the engine via `engine_client` exactly as in-tree handlers do; do not open a new engine access path.
 
-**(b) Engine / worker-side behaviour — `vllm.general_plugins`**
+**(b) Engine / worker-side behaviour: `vllm.general_plugins`**
 
 - `DEFAULT_PLUGINS_GROUP = "vllm.general_plugins"` (`plugins/__init__.py:18`), loaded in process0, EngineCore **and workers** via `load_general_plugins()` (`:77-90`), called from `EngineCore.__init__`.
-- This is the sanctioned place to install a new worker-side RPC name so `EngineClient.collective_rpc("<name>")` resolves — **no ZMQ framing change needed**, because `_invoke_utility_method` resolves EngineCore methods by name (`core.py:1659-1672`) and `run_method` resolves worker methods by name (`vllm/v1/serial_utils.py:485`).
+- This is the sanctioned place to install a new worker-side RPC name so `EngineClient.collective_rpc("<name>")` resolves: **no ZMQ framing change needed**, because `_invoke_utility_method` resolves EngineCore methods by name (`core.py:1659-1672`) and `run_method` resolves worker methods by name (`vllm/v1/serial_utils.py:485`).
 
 **Precedent:** `#47173` added `/abort_requests` as a dev route; `#49040` added `/weight_info` + `/update_weight_version`. Both were dev-router additions, not new architecture.
 
@@ -809,27 +809,27 @@ Consistent with RFC #48311 / #48305 listing the "RL CI matrix" (`#45585`) as an 
 
 - Do **not** invent a weight-sync transport. Four backends are registered and pluggable (`factory.py:41-82`).
 - Do **not** invent a drain primitive. `pause(mode="wait")` already blocks until `not has_work()`.
-- Do **not** add a per-request version field to `Request`/`RequestOutput` — #49040 removed that deliberately; the contract is still open (RFC #48306 §2.2).
+- Do **not** add a per-request version field to `Request`/`RequestOutput`: #49040 removed that, and the contract is still open (RFC #48306 §2.2).
 - Do **not** assume any cache is version-aware. It is not (§5.4).
 - Do **not** rely on `finish_weight_update` to invalidate anything (§2.2, §5.5).
-- Do **not** rely on `mode="keep"` for a strict one-version-per-response invariant — it lets a single request span two weight versions by design (`docs/training/async_rl.md:61`).
+- Do **not** rely on `mode="keep"` for a strict one-version-per-response invariant: it lets a single request span two weight versions by design (`docs/training/async_rl.md:61`).
 
 ---
 
-## 10. RFC cross-check — claim vs. main
+## 10. RFC cross-check: claim vs. main
 
 | RFC | Claim | Status on main@00b7847c |
 |---|---|---|
 | **#48314** (roadmap) | Anchors 31848 / 48311 / 48306 / 48305 | All four open; roadmap updated 2026-09-17 |
-| **#48311** | `sleep(level=2, mode="wait")` implements drain | **Partially.** Drain is `pause_scheduler`'s Future (`core.py:1984-2026`). `mode="wait"` **raises** for in-proc engines (`core.py:902-903`) — matches the RFC's "inproc-engine support (currently raises)" |
+| **#48311** | `sleep(level=2, mode="wait")` implements drain | **Partially.** Drain is `pause_scheduler`'s Future (`core.py:1984-2026`). `mode="wait"` **raises** for in-proc engines (`core.py:902-903`): matches the RFC's "inproc-engine support (currently raises)" |
 | #48311 | Requests arriving during drain hang instead of being rejected (#45326) | Consistent: `PAUSED_NEW`/`PAUSED_ALL` queue new adds and never reject (`core.py:889`; `scheduler.py:2666-2668`) |
 | #48311 | `release_kv_cache` API (#46438 → #44890) | **Landed** as `release_kv_cache_memory()` (`core.py:984`) with `Executor.discard(("kv_cache",))` |
 | #48311 | Pause-state Prometheus metric (#45524) | **Open** (GitHub state `open`, not merged) |
 | #48311 | CUDA checkpoint/restore (#34303) | `checkpoint_prepare` / `checkpoint_restore` exist (`async_llm.py:1117-1121`); `SleepModeBackend.supports_durable_storage():110` is the capability probe |
 | **#31848** | `init_weight_transfer_engine` / `update_weights` / `finish_weight_update`; NCCL + IPC; `WeightTransferConfig` | **Landed and exceeded.** Routes are `/init_weight_transfer_engine` (`rlhf/api_router.py:156`) and `/start_weight_update` (`:174`); **four** backends registered (`factory.py:222-270`) |
-| #31848 | `/finalize_weight_update` redundant | **Confirmed** — no such route; finalization lives inside `finish_weight_update` |
-| #31848 | "tracking weight versions" | **Partially** via #49040 — query/update only, no per-request tagging |
-| #31848 | Alternative to `DEV_MODE` for endpoints | **Still open** — RL endpoints remain `VLLM_SERVER_DEV_MODE`-gated (`routers.py:34`) |
+| #31848 | `/finalize_weight_update` redundant | **Confirmed**: no such route; finalization lives inside `finish_weight_update` |
+| #31848 | "tracking weight versions" | **Partially** via #49040: query/update only, no per-request tagging |
+| #31848 | Alternative to `DEV_MODE` for endpoints | **Still open**: RL endpoints remain `VLLM_SERVER_DEV_MODE`-gated (`routers.py:34`) |
 | #31848 | RDT weight transfer engine | **Only `sharded_rdt` exists**; no plain `rdt` backend or registry key |
 | #31848 | NCCL M2N sharding-aware transfer (#46439) | `sharded_rdt` + `sparse_nccl` exist; `#46439` itself is a separate open issue |
 | **#48306** | `/abort_requests` (#47173) | **Merged** (`rlhf/api_router.py:95`) |
@@ -838,18 +838,18 @@ Consistent with RFC #48311 / #48305 listing the "RL CI matrix" (`#45585`) as an 
 | #48306 §2.2 | Pause-state metric (#45524) | **Open** |
 | #48306 §2.2 | Version metadata in rollout responses | **NOT PRESENT**; contract explicitly open (maintainer comment, 2026-09-16) |
 | **#48305** §3.1 | `trace_decode_token_ids` (#46701) | **Landed** (`sampling_params.py:374`); **requires MRV2** (`config/vllm.py:1266`) |
-| #48305 §3.2 | R3 routing replay | **Partially** — capture/transport/response exist (`outputs.py:64`); FlashInfer + P/D + KV-offload combos still open per the RFC checklist |
-| #48305 §3.3 | DSA index replay (#47280/#47279) | **NOT PRESENT** — no `enable_return_indexer_topk` |
+| #48305 §3.2 | R3 routing replay | **Partially**: capture/transport/response exist (`outputs.py:64`); FlashInfer + P/D + KV-offload combos still open per the RFC checklist |
+| #48305 §3.3 | DSA index replay (#47280/#47279) | **NOT PRESENT**: no `enable_return_indexer_topk` |
 | #48305 §3.4 | Artifact transfer connector (#47809) | **Not merged** (`closed`, `merged_at: null`) |
 | #48305 §3.6 | Dtype replay (#48390) | **Merged** 2026-07-13 |
-| **#48312** | Cat. 7: "#48762 or an equivalent non-reverted fix lands" | **Not landed** — `#48762` closed unmerged; `finish_weight_update` still invalidates no cache |
+| **#48312** | Cat. 7: "#48762 or an equivalent non-reverted fix lands" | **Not landed**: `#48762` closed unmerged; `finish_weight_update` still invalidates no cache |
 | #48312 | Cat. 1 fixes #48251 / #46009 / #41670 / #48438 / #48539 | Several still open per exit criteria; `#48478` production registry still **open** |
 | #48312 | Composite lane `pause/drain → sleep → wake(weights) → update → post-load → wake(kv) → invalidate → resume` | **Not present in CI.** Closest in-tree test is `test_pause_resume.py` (pause/resume only, no weight update) |
-| #48312 | Queryable generation identity / read-your-writes | **Not present** — `GET /weight_info` returns the last value *set*; no commit certificate |
+| #48312 | Queryable generation identity / read-your-writes | **Not present**: `GET /weight_info` returns the last value *set*; no commit certificate |
 
 ---
 
-## Appendix A — Endpoint reference (all require `VLLM_SERVER_DEV_MODE=1`)
+## Appendix A: Endpoint reference (all require `VLLM_SERVER_DEV_MODE=1`)
 
 | Method | Path | Engine method | Router |
 |---|---|---|---|
@@ -875,7 +875,7 @@ Consistent with RFC #48311 / #48305 listing the "RL CI matrix" (`#45585`) as an 
 | POST | `/collective_rpc` (body `method`, `args`, `kwargs`, `timeout`) | `collective_rpc` | `dev/rpc/api_router.py:23` |
 | GET | `/server_info?config_format=` | reads `app.state.vllm_config` | `dev/server_info/api_router.py:43` |
 
-## Appendix B — Minimal vLLM launch for a rollout engine
+## Appendix B: Minimal vLLM launch for a rollout engine
 
 ```bash
 VLLM_SERVER_DEV_MODE=1 vllm serve <model> \
@@ -884,7 +884,7 @@ VLLM_SERVER_DEV_MODE=1 vllm serve <model> \
 ```
 Precedent: `examples/rl/rlhf_http_nccl.py:63-83` (which also uses `--load-format dummy` to start before real weights exist).
 
-## Appendix C — Raw research artifacts
+## Appendix C: Raw research artifacts
 
 Fetched RFC bodies and comment threads (untrusted upstream data, kept verbatim) in `research/`:
 `rfc_48314.json`, `rfc_48311.json`, `rfc_31848.json`, `rfc_48305.json`, `rfc_48306.json`, `rfc_48312.json`, `comments_48314.md`, `comments_31848.md`, `comments_48306.md`, `comments_48312.md`.

@@ -1,4 +1,4 @@
-# Phase 3A runbook — real vLLM control plane on one GPU
+# Phase 3A runbook: real vLLM control plane on one GPU
 
 **Status: this runbook has been executed successfully.** The 2026-09-24 run is
 recorded in `docs/phase3a-results.md` (16/16 checks, one A6000, the audited
@@ -15,7 +15,7 @@ no-op update. Phase 3A is an adapter-level integration test
 (`scripts/live_control_plane_smoke.py`); the full nine-state cycle becomes real in
 Phase 3C after Phase 3B implements the driver.
 
-**Budget.** One small GPU, roughly 45–60 minutes of pod time. The harness itself
+**Budget.** One small GPU, roughly 45 to 60 minutes of pod time. The harness itself
 takes about a minute; the rest is environment setup.
 
 ---
@@ -29,7 +29,7 @@ VLLM_CHECKOUT=~/Desktop/vllm-learning/vendor/vllm-main ./scripts/test.sh   # + a
 ```
 
 Then run the harness against the in-repo stub. This exercises the *entire*
-sequence — all eleven checks, the JSON artifact, and the failure paths — with no
+sequence (all eleven checks, the JSON artifact, and the failure paths) with no
 GPU and no vLLM:
 
 ```bash
@@ -40,7 +40,7 @@ python3 scripts/live_control_plane_smoke.py --base-url http://127.0.0.1:8123 \
 kill %1
 ```
 
-**Checkpoint CP0 — do not rent until:** `./scripts/test.sh` is green, the stub run
+**Checkpoint CP0. Do not rent until:** `./scripts/test.sh` is green, the stub run
 prints `RESULT: PASS`, and `pytest tests/test_live_smoke.py` is green (it covers
 the drift, warm-server, and in-process-engine failure modes).
 
@@ -60,18 +60,18 @@ git push origin main
 
 | Setting | Value | Why |
 |---|---|---|
-| GPUs | **1×** RTX 4090 / L40S / A6000 / A100 (≥16 GB) — whichever is available | `opt-125m` needs ~1 GB; the harness is not compute-bound, so the GPU class is irrelevant to the result |
+| GPUs | **1×** RTX 4090 / L40S / A6000 / A100 (≥16 GB), whichever is available | `opt-125m` needs ~1 GB; the harness is not compute-bound, so the GPU class is irrelevant to the result |
 | Image | any recent **Ubuntu 24.04 + CUDA 12.8+** template, e.g. `runpod/pytorch:*-cu1281-torch280-ubuntu2404` | see the note below on why the template's torch version does not matter |
 | Container disk | ≥ 50 GB (100 GB is fine) | image ~15 GB + model + pip/uv cache |
 | Volume | **optional for a single 3A sitting** (RunPod's "nothing mounted" notice is a warning, not a blocker). Add one, mounted at `/workspace`, only if you may restart the pod or are continuing straight into 3B | keeps the vLLM install (~10 GB) and the HF cache across a restart; costs ~$0.07/GB/month whether or not the pod runs |
 | Env var | `HF_HOME=/workspace/hf` **only if you mounted a volume** | so the model lands on the volume, not the ephemeral container |
-| Exposed ports | `8888` (Jupyter) and `22` (SSH) only | **never expose 8000** — `/pause`, `/update_weight_version` and `/reset_*` are unauthenticated destructive controls |
+| Exposed ports | `8888` (Jupyter) and `22` (SSH) only | **never expose 8000**: `/pause`, `/update_weight_version` and `/reset_*` are unauthenticated destructive controls |
 | UDP | off | unused |
 
 **The template's PyTorch version does not matter.** vLLM pins `torch==2.13.0`
 (`requirements/cuda.txt:7`) and the wheel carries its own CUDA runtime, so
 installing vLLM into a venv replaces whatever the image shipped. What matters is
-the **host driver**, which `nvidia-smi` reports — that is what decides between
+the **host driver**, which `nvidia-smi` reports; that is what decides between
 `cu129` and `cu130`.
 
 **Don't bother with `vllm/vllm-openai` on RunPod** unless you are comfortable
@@ -94,7 +94,7 @@ Read from the audit checkout (`vendor/vllm-main` @ `00b7847c`), not guessed:
 | Python | `>=3.10,<3.15` | `pyproject.toml:35` |
 | Blackwell (B200/GB200) | needs ≥ CUDA 12.8 | `gpu.cuda.inc.md:39` |
 
-So: **do not pick a torch version yourself** — vLLM pins it, and picking your own
+So: **do not pick a torch version yourself**. vLLM pins it, and picking your own
 is how these runs die. Pick the *variant* from the driver, which is what
 `uv ... --torch-backend=auto` does for you.
 
@@ -111,7 +111,7 @@ nvidia-smi          # note the "CUDA Version:" field = the max CUDA this driver 
 - says **13.0+** → `cu130` wheels, or just let auto-detection decide
 - says **12.x** → `cu129` wheels (`--torch-backend=cu129` / `VLLM_PRECOMPILED_WHEEL_VARIANT=cu129`)
 
-**Checkpoint CP1 — proceed only if** `nvidia-smi` names the GPU. Record its
+**Checkpoint CP1. Proceed only if** `nvidia-smi` names the GPU. Record its
 output; it goes into the report.
 
 ---
@@ -122,7 +122,7 @@ The repository is **private**, so a plain `https://` clone will stop at
 `Username for 'https://github.com':`. Pick one:
 
 **A. tar over SSH from the Mac (no GitHub auth, and no `rsync` needed on the
-pod — recommended).** In RunPod's Connect panel use the **SSH over exposed TCP**
+pod; recommended).** In RunPod's Connect panel use the **SSH over exposed TCP**
 tab, not the `ssh.runpod.io` proxy (that one documents "No support for SCP &
 SFTP"):
 
@@ -140,7 +140,7 @@ Keep `.git` in the copy: the artifact records `rolloutcore_sha` from
 `git rev-parse HEAD` inside the repo. (~800 KB, so this is cheap.)
 
 `rsync` is equivalent if the image has it, but note the SSH key must not be a
-bare `~` inside `-e`, which rsync does not expand — use `$HOME`:
+bare `~` inside `-e`, which rsync does not expand; use `$HOME`:
 
 ```bash
 rsync -av -e "ssh -p <port> -i $HOME/.ssh/id_ed25519" \
@@ -157,7 +157,7 @@ git clone https://<TOKEN>@github.com/awesome-pro/rolloutcore.git && cd rolloutco
 ```
 
 A classic PAT needs `repo` scope; a fine-grained token needs *Contents: Read*.
-The repository name is **`awesome-pro`** — a missing letter gives the credential
+The repository name is **`awesome-pro`**: a missing letter gives the credential
 prompt too, so check it before assuming the token is wrong.
 
 **C. Upload a tarball** through Jupyter's file browser, then
@@ -181,7 +181,7 @@ git rev-parse HEAD 2>/dev/null || echo "rsync copy: record the Mac's HEAD instea
 ls src/rolloutcore scripts/live_control_plane_smoke.py tests/fake_dev_server.py
 ```
 
-RolloutCore itself needs **nothing installed** — the harness is pure stdlib and
+RolloutCore itself needs **nothing installed**: the harness is pure stdlib and
 bootstraps `src/` onto `sys.path` by itself. Only vLLM needs installing.
 
 ---
@@ -190,7 +190,7 @@ bootstraps `src/` onto `sys.path` by itself. Only vLLM needs installing.
 
 Target: `00b7847c8036b667742b4efb21aab1de51fd4721`.
 
-**Option 0 — you used the `vllm/vllm-openai` image:** nothing to install. Verify
+**Option 0 (you used the `vllm/vllm-openai` image):** nothing to install. Verify
 and skip to step 4:
 
 ```bash
@@ -205,7 +205,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -U pip && pip install uv        # uv is the supported installer here
 ```
 
-**Option A (recommended) — the prebuilt wheel for that exact commit.** vLLM
+**Option A (recommended): the prebuilt wheel for that exact commit.** vLLM
 publishes a wheel per commit since v0.5.3:
 
 ```bash
@@ -239,10 +239,10 @@ uv pip install vllm --torch-backend=cu129 \
 
 `pip` is **not** supported against vLLM's nightly/commit indices (it merges
 indexes and takes the newest version, so you silently get a different build). If
-you insist on `pip`, install the wheel URL directly — see
+you insist on `pip`, install the wheel URL directly; see
 `gpu.cuda.inc.md:67-72`.
 
-**Option B — source at the pinned commit** (20–40 min, CUDA toolchain required;
+**Option B: source at the pinned commit** (20 to 40 min, CUDA toolchain required;
 use only if Option A fails):
 
 ```bash
@@ -252,7 +252,7 @@ git checkout 00b7847c8036b667742b4efb21aab1de51fd4721
 VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
 ```
 
-**Option C — latest release** (2 min) — acceptable, but the artifact's
+**Option C: latest release** (2 min). Acceptable, but the artifact's
 `vllm_sha_matches_report` check then records a **warning**, and you must paste
 that warning back with the results:
 
@@ -272,7 +272,7 @@ python3 -c "import vllm.entrypoints.serve.dev.rlhf.api_router as r; print('dev r
 
 The metadata version must contain the commit (`g00b7847c8`). If it is a plain
 release like `0.23.1`, then the commit index did not serve the request and uv
-silently resolved against PyPI — you have the wrong build, and any CUDA-variant
+silently resolved against PyPI: you have the wrong build, and any CUDA-variant
 mismatch will show up as an import error rather than a version mismatch.
 
 **Variant consistency is mandatory.** The vLLM wheel and torch must come from the
@@ -282,7 +282,7 @@ with cu129 torch) or the mirror image. Install both in one command from one
 variant, and if you change your mind, recreate the venv rather than layering a
 second install on top.
 
-**Checkpoint CP2 — proceed only if** `vllm` imports and `vllm serve --help`
+**Checkpoint CP2. Proceed only if** `vllm` imports and `vllm serve --help`
 works. If you installed C instead of A/B, say so in the report; do not silently
 mix versions.
 
@@ -339,7 +339,7 @@ If the prefix keeps fighting your terminal, don't fight it:
 - **A second SSH session is the simplest fix.** Keep the server in tmux window 0
   and open another terminal on your Mac, `ssh` in again, and run the harness
   there. `tmux attach -t vllm` is only needed if you want to *watch* the server.
-- **Or skip tmux for the server entirely** — `nohup` survives a disconnect just
+- **Or skip tmux for the server entirely**: `nohup` survives a disconnect just
   as well:
 
   ```bash
@@ -358,17 +358,17 @@ If the prefix keeps fighting your terminal, don't fight it:
   ```
 
 Suggested layout: window 0 runs the server, window 1 runs the harness. Or use
-`--launch` in step 6, which starts and stops the server itself — still do it
+`--launch` in step 6, which starts and stops the server itself; still do it
 inside tmux so an accidental disconnect cannot kill the run mid-drain.
 
 `VLLM_ENABLE_V1_MULTIPROCESSING=1` is the default, but say it explicitly: the
 in-process engine path rejects `mode="wait"` outright
 (`ValueError`, `vllm/v1/engine/core.py:902`), and `mode="wait"` is the only drain
-mode RolloutCore accepts — `mode="keep"` lets one response span two weight
+mode RolloutCore accepts: `mode="keep"` lets one response span two weight
 versions.
 
 Manual start (useful for the first run; `--launch` in step 6 does this for you).
-Run it under `tmux` — a web terminal disconnect should not kill the server, and
+Run it under `tmux`: a web terminal disconnect should not kill the server, and
 `--launch` mode needs no second shell at all:
 
 ```bash
@@ -390,7 +390,7 @@ curl -s localhost:8000/is_paused     # {"is_paused":false}
 curl -s localhost:8000/get_world_size
 ```
 
-**Checkpoint CP4 — proceed only if** `/weight_info` says `"default"`. If it says
+**Checkpoint CP4. Proceed only if** `/weight_info` says `"default"`. If it says
 anything `rc-*`, the server is not fresh: restart it (or use
 `--reset-label-to-default`, which is a dev-mode escape hatch, not a workflow).
 
@@ -454,7 +454,7 @@ revalidation path (`docs/state-machine.md` §12 item 5). A controller that canno
 vouch for a serving engine must not pretend otherwise, so it taints and the
 report marks it `expected`. That is the fail-closed behaviour, not a failure.
 
-**Checkpoint CP5 — Phase 3A is done when** the script exits `0` with
+**Checkpoint CP5. Phase 3A is done when** the script exits `0` with
 `"failed_checks": []`. A `warn` on `environment` means the vLLM version is not the
 audited commit; record it and continue, but say so.
 
@@ -482,11 +482,11 @@ Download `phase3a-results.tgz` (RunPod file browser, `scp`, or `runpodctl`), the
 keep paying while the results are reviewed.
 
 Without a volume: **nothing on the pod survives `Stop`** (the container disk is
-erased), so pull `results/phase3a.json` *before* stopping — step 7 does exactly
+erased), so pull `results/phase3a.json` *before* stopping; step 7 does exactly
 that. Re-running later costs a fresh `uv pip install` (~5 min) and a 250 MB model
 download.
 
-**Checkpoint CP6 — stop here.** Send back:
+**Checkpoint CP6. Stop here.** Send back:
 
 1. `results/phase3a.json` (all of it),
 2. the `gpu.txt` / `vllm-version.txt` / `pip.txt` lines,
@@ -522,12 +522,12 @@ actually showed.
 | `pause_mode_wait_supported` fails with `'wait' mode can't be used in inproc-engine mode` | engine core is in-process | `VLLM_ENABLE_V1_MULTIPROCESSING=1` (and do not pass `--disable-frontend-multiprocessing`) |
 | `/weight_info` → 404 | dev mode off | `VLLM_SERVER_DEV_MODE=1` |
 | `fresh_weight_info_is_default` fails with `rc-…` | server already driven by a previous run | restart the server, or `--reset-label-to-default` (dev only) |
-| `deterministic_generation_after_resume` fails | genuine incoherence, or kernel nondeterminism | first re-run; if it reproduces, keep the failure and report it — that is exactly the kind of finding Phase 3A exists to surface. `--no-strict-generation` records it as a warning instead of failing |
+| `deterministic_generation_after_resume` fails | genuine incoherence, or kernel nondeterminism | first re-run; if it reproduces, keep the failure and report it. That is exactly the kind of finding Phase 3A exists to surface. `--no-strict-generation` records it as a warning instead of failing |
 | `cache_resets_succeed` fails on prefix | blocks still held | the drain must complete first; check the pause actually returned |
 | CUDA OOM at startup | `--max-model-len`/`--gpu-memory-utilization` too high for the pod | lower both; 512 / 0.6 is already conservative |
 | `connection refused` on `/health` | server still loading or crashed | the launcher waits up to 900 s and prints the log tail on failure |
 | `environment` warns | vLLM is not the audited commit | record it in the report; do not hide it |
-| `ImportError: libcudart.so.13` (or `.so.12`) | vLLM wheel and torch came from different CUDA variants | `rm -rf .venv`, recreate it, and install both from one variant in a single `uv pip install` — never layer a second install over a mismatched one |
+| `ImportError: libcudart.so.13` (or `.so.12`) | vLLM wheel and torch came from different CUDA variants | `rm -rf .venv`, recreate it, and install both from one variant in a single `uv pip install`; never layer a second install over a mismatched one |
 | `invalid value 'cu130' for '--torch-backend'` | `--torch-backend` is an uv enum, and uv 0.9.0 stops at `cu129` | `pip install -U uv`, or use `cu129` (fine on a 580 driver) |
 | `fatal: detected dubious ownership` | a tarball copied from the Mac carried uid 501 into a root shell | `chown -R root:root /workspace/rolloutcore`, or add a `safe.directory` exception |
 | `CUDA driver version is insufficient for CUDA runtime version` | the wheel is `cu130` but the driver is older than R580 (`gpu.cuda.inc.md:327`) | reinstall with `--torch-backend=cu129`, or move to a pod whose driver is R580+ |
@@ -537,7 +537,7 @@ actually showed.
 
 ## What Phase 3A does *not* prove
 
-- That weights can be replaced (no NCCL driver exists yet — Phase 3B).
+- That weights can be replaced. No NCCL driver exists yet, so that is Phase 3B.
 - That `WeightIdentity` matches what the engine is holding: the engine reports
   only an opaque version string, so the identity is *declared* provenance, not
   verified bytes.

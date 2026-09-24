@@ -1,4 +1,4 @@
-# Phase 4B results — the failure paths, against a real engine
+# Phase 4B results: the failure paths, against a real engine
 
 **Result: PASS. 21/21 checks.** Four scenarios, three engine lifetimes, against
 real vLLM. Every fail-closed claim in this project had until now been tested only
@@ -30,7 +30,7 @@ A_recovery_installs_the_update         rc-1
 A_recovery_serves                      ' the capital of the French Republic...'
 ```
 
-The in-flight request's outcome is `abort` — vLLM aborted it and returned the
+The in-flight request's outcome is `abort`: vLLM aborted it and returned the
 partial result rather than erroring, which is what makes the abort-and-reissue
 strategy work. The recovery reuses the **same driver** (its NCCL session with the
 engine was still live) and only swaps in a fresh adapter with a real timeout; the
@@ -50,7 +50,7 @@ retryable condition, not a reason to throw the engine away.
 `/start_weight_update` appears **zero** times in the server log for that attempt,
 the engine is left paused, still at rc-1, and the controller is not tainted. The
 driver computed its identity from the trainer's own manifest and compared it to
-the target's *before* `send_weights()` — so "fail before mutating" is asserted
+the target's *before* `send_weights()`, so "fail before mutating" is asserted
 from the engine's own request log, not from our bookkeeping.
 
 The handback check then measured the gap:
@@ -65,13 +65,13 @@ engine and V1 does not implement one.
 So a driver-side failure mid-`UPDATING` leaves the engine paused at rc-1, the
 controller stuck in UPDATING, and a fresh controller refused. Recovery in that
 state is an operator action (the harness restores service with a raw `/resume`),
-not a RolloutCore transition — see the finding below.
+not a RolloutCore transition; see the finding below.
 
 ## C. A dead engine: two paths, and they differ
 
 The engine's whole process group is SIGKILLed, then a cycle is attempted.
 
-**C1 — the drain path does not taint.** This was predicted from reading
+**C1: the drain path does not taint.** This was predicted from reading
 `_observe` (`src/rolloutcore/runner.py:213`: reads are deliberately never
 tainted, because during DRAINING the engine is paused and a failed read leaves
 nothing ambiguous), and the run confirms it:
@@ -84,7 +84,7 @@ tainted   false
 committed rc-0
 ```
 
-**C2 — the mutating path taints, as designed.** A fresh controller cannot even
+**C2: the mutating path taints, as designed.** A fresh controller cannot even
 bootstrap, because the very first read fails with an unknown engine outcome:
 
 ```
@@ -94,35 +94,35 @@ unknown engine outcome: HTTPAdapterError('GET .../weight_info: transport error:
 construct a new controller.
 ```
 
-**C3 — the taint is terminal and local:**
+**C3: the taint is terminal and local:**
 
 ```
 IllegalTransitionError: [T-ILLEGAL] event 'begin_drain' is not legal from state TAINTED
 ```
 
-refused in under 50 ms, with no network I/O — `_require_legal` runs before any
+refused in under 50 ms, with no network I/O: `_require_legal` runs before any
 precondition (`lifecycle.py:303`).
 
 ## D. Recovery is a fresh process
 
 A third engine and a fourth controller: bootstrap succeeds, the label is `rc-0`,
 and it serves. Taint is controller-scoped, and the engine's state died with its
-process — so restart is a real recovery path, not a workaround.
+process, so restart is a real recovery path, not a workaround.
 
 ## Findings
 
 **1. A drain failure is fail-closed but not self-healing, and the error message
 used to say the wrong thing.** DRAINING has exactly one exit, `CONFIRM_DRAINED`
 (`lifecycle.py:130`), so an engine that never comes back leaves the controller
-untainted in DRAINING forever. That is *safe* — DRAINING admits no rollouts and no
-version was published — and it is the right classification, because taint is for
+untainted in DRAINING forever. That is *safe* (DRAINING admits no rollouts and no
+version was published), and it is the right classification, because taint is for
 ambiguous *mutations* and a failed drain writes nothing. But nothing escalates it
 either, so the exit is an operator `taint()`.
 
 The run also showed the old `DrainFailedError` text was actively misleading in
 this case: it said "The engine remains paused; resuming is an operator decision"
-when the last error was `Connection refused` — the engine was not paused, it was
-gone, and its pause state was precisely what could not be confirmed. The message
+when the last error was `Connection refused`: the engine was not paused, it was
+gone, and its pause state was what could not be confirmed. The message
 now says the pause state is unconfirmed and names the two decisions available,
 and `tests/test_cycle.py` pins the dead-engine outcome so it cannot drift.
 
@@ -132,7 +132,7 @@ a legal exit (`(UPDATING, CONFIRM_UPDATED)` is the only transition out), and a
 fresh controller refused by the managed-label check. The check's own message is
 the honest summary: *a lease/recovery protocol is required to take over a managed
 engine and V1 does not implement one*. This is the clearest candidate for an
-upstream proposal, and it is the same shape as the drain finding — the failure is
+upstream proposal, and it is the same shape as the drain finding: the failure is
 detected correctly and then has nowhere to go.
 
 **3. The error taxonomy held up under real failures.** Every injected failure
@@ -149,11 +149,11 @@ named the invariant, the state, and in two cases the missing upstream feature.
   and 6 went on to measure: 4D landed one at the update's edge and got a taint in
   0.177 s, while 6 landed one *inside* an 8B collective and it never returned. The
   bounded `NCCL_TIMEOUT` this section originally suggested does not exist in that
-  path — see `docs/phase3b-runbook.md` §10.2.
+  path; see `docs/phase3b-runbook.md` §10.2.
 - **Not a dead engine under load.** C1 has no in-flight rollouts; A's drain
   failure does. The two are not combined.
 - **`opt-125m`, one node, TP=1.**
-- **The 0.1 s timeout is a synthetic failure** — a real engine under real load
+- **The 0.1 s timeout is a synthetic failure**: a real engine under real load
   produces slow drains, not socket timeouts.
 
 ## Reproduce

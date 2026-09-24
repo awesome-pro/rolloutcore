@@ -1,4 +1,4 @@
-# Phase 3C results — the first real RolloutCore cycle
+# Phase 3C results: the first real RolloutCore cycle
 
 **Result: PASS. 5/5 checks**, on two real GPUs, with a real NCCL weight transfer,
 driven end to end by `LifecycleRunner.run_cycle()`.
@@ -43,9 +43,9 @@ READY(rc-0) --dummy weights--> generate gibberish
 
 Two checks carry the weight:
 
-- **`committed_rc1`** — the commit point is the resume, not the finalize. The
+- **`committed_rc1`**: the commit point is the resume, not the finalize. The
   controller does not advance its own version until `/resume` is acknowledged.
-- **`engine_label_rc1`** — the engine reports `rc-1` *while still paused*. This
+- **`engine_label_rc1`**: the engine reports `rc-1` *while still paused*. This
   only happens because `RolloutCoreWeightSyncClient` supplies the version
   upstream omits: `NCCLTrainerWeightTransferEngine.send_weights()` calls
   `finish_weight_update()` with no argument (`nccl_engine.py:361`) although the
@@ -58,7 +58,7 @@ to reach the end of the state machine.
 
 ## The strongest single piece of evidence
 
-The `after` text is identical, token for token, to Phase 3A's generation — and in
+The `after` text is identical, token for token, to Phase 3A's generation, and in
 Phase 3A nothing was transferred at all:
 
 > `' the capital of the French Republic.\n\nThe capital of France is the capital'`
@@ -66,7 +66,7 @@ Phase 3A nothing was transferred at all:
 Phase 3A's server loaded these weights through vLLM's own loader; Phase 3C's
 server started from garbage and received them over NCCL. Same text, same prompt,
 same `temperature=0`. So the bytes that arrived over the wire are the bytes the
-loader would have produced — which is what "the transfer works" has to mean.
+loader would have produced, which is what "the transfer works" has to mean.
 
 The `before` output is the control: the same `<s>` token sixteen times
 (`token_ids` are all `0` in the artifact), which is what `--load-format dummy`
@@ -86,7 +86,7 @@ From `results/phase3c.json`:
 The 0.673 s cycle is this phase's **floor**: nothing was in flight, so the drain
 had nothing to wait for. Phase 4A runs the same cycle with a rollout to wait for,
 and it takes 2.149 s, of which 1.375 s is the drain holding for that rollout. The
-two together are the honest picture — the cycle is cheap when it has no one to
+two together are the honest picture: the cycle is cheap when it has no one to
 wait for, and it is *supposed* to be slow when it does.
 
 The two generation times are not a benchmark (different weights, different
@@ -95,7 +95,7 @@ a baseline.
 
 ## The limitation this run exposes
 
-`[identity] 925369d663bc (manifest-only)` — and the *same* digest appears as the
+`[identity] 925369d663bc (manifest-only)`, and the *same* digest appears as the
 target for `rc-1`:
 
 ```
@@ -104,7 +104,7 @@ target for `rc-1`:
 
 `WeightIdentity` is derived from `WeightSource.metadata()`: parameter names,
 dtypes and shapes. For `opt-125m` that manifest is identical for *any* weights of
-that architecture — the dummy ones and the real ones included. So the identity
+that architecture (the dummy ones and the real ones included). So the identity
 proves structure, not values; only the engine's opaque `rc-*` label distinguishes
 the two versions here.
 
