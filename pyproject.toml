@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rolloutcore"
+version = "0.1.0"
+description = "A versioned RL rollout runtime for vLLM: lifecycle control plane with weight-version binding"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = []          # Phase 1 is pure stdlib, deliberately.
+
+[project.optional-dependencies]
+# Phase 2 will need an HTTP client for the vLLM dev endpoints and the
+# trainer-side weight-transfer classes from vLLM itself.
+vllm = ["vllm"]
+dev = ["pytest>=8", "pytest-cov>=5", "mypy>=1.10", "ruff>=0.6"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# `src` for the package, `tests` so `from support import ...` resolves the same
+# way it does under `python -m unittest discover -s tests -t tests`.
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/rolloutcore"]
