@@ -21,7 +21,7 @@ from rolloutcore import (
     UpdateEvidence,
     ValidateEvidence,
     WeightIdentity,
-    WeightSource,
+    WeightProvenance,
 )
 
 
@@ -117,10 +117,10 @@ class TestUpdateEvidence(unittest.TestCase):
     def test_provenance_mismatch_is_reported_with_its_source(self):
         """Review item 4: the digest is checked *and* explained."""
         staged = WeightIdentity.from_pairs(
-            [("a", "bfloat16", (2, 2))], source=WeightSource(step=100)
+            [("a", "bfloat16", (2, 2))], source=WeightProvenance(step=100)
         )
         asked = WeightIdentity.from_pairs(
-            [("a", "bfloat16", (2, 2))], source=WeightSource(step=500)
+            [("a", "bfloat16", (2, 2))], source=WeightProvenance(step=500)
         )
         reason = self._ev(observed_identity=staged, target=target(1, asked)).failure_reason()
         self.assertIn("step=100", reason)

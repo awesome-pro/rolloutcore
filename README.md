@@ -15,8 +15,10 @@ weight source that produced it.
 > state machine, the typed adapter port, a stdlib HTTP adapter for the lifecycle
 > **control plane**, and a full `READY → … → READY` cycle against an in-memory
 > fake engine. Real weight transfer (NCCL) is **not** implemented, and real-GPU
-> work (Phase 3) has not started. Do not point this at a GPU expecting a hot
-> weight update yet.
+> work has started: **Phase 3A** is a real-vLLM control-plane smoke
+> (`scripts/live_control_plane_smoke.py`), ready to run on a one-GPU pod — see
+> `docs/phase3a-runbook.md`. Do not point this at a GPU expecting a hot weight
+> update: NCCL weight transfer is Phase 3B (`docs/phase3b-notes.md`).
 
 ---
 
@@ -30,6 +32,14 @@ python -m rolloutcore.demo # full cycle, fake engine, no GPU
 # Re-derive every file:LINE claim in the docs against a vLLM checkout:
 VLLM_CHECKOUT=/path/to/vllm ./scripts/test.sh
 python scripts/verify_anchors.py --vllm /path/to/vllm
+
+# Phase 3A harness, rehearsed with no GPU against the in-repo stub server:
+PYTHONPATH=src:tests python tests/fake_dev_server.py --port 8123 &
+python scripts/live_control_plane_smoke.py --base-url http://127.0.0.1:8123 \
+    --model facebook/opt-125m --json-out /tmp/phase3a-stub.json
+
+# Phase 3A for real (on a GPU pod, vLLM >= the audited commit):
+python scripts/live_control_plane_smoke.py --launch --model facebook/opt-125m
 ```
 
 Pure stdlib on Python ≥ 3.11 — nothing to install. `scripts/test.sh` picks up
@@ -58,6 +68,8 @@ runner.install_next(manifest_identity("B"))        # -> READY at rc-1
 |---|---|
 | `PROJECT.md` | Project brief: why it exists, invariants, roadmap, upstream-contribution policy |
 | `docs/state-machine.md` | **Design** — states, transitions, failure policy, adapter port, fake-engine fidelity |
+| `docs/phase3a-runbook.md` | **Runbook** — one-GPU pod setup, the exact commands, checkpoints, pass/fail criteria, troubleshooting |
+| `docs/phase3b-notes.md` | Phase 3B plan — the target-aware weight-sync client and the `finish_weight_update` version gap |
 | `docs/plan-delta.md` | Original plan vs. source-map findings vs. implementation amendments |
 | `source-map-vllm-main.md` | Source-level map of vLLM `main`: 9 subsystems, every claim anchored to `file:LINE`, plus an RFC cross-check |
 | `mvp-plan.md` | The minimal real-vLLM cycle: exact HTTP call sequence, integration surface, guardrails |
@@ -106,7 +118,7 @@ real GitHub tip, not a local fork:
 The sibling checkout `vendor/vllm` is a stale fork (`d90f0eade5`) and was not
 used. The worktree is a shallow clone (depth 1), so **"NOT PRESENT" means absent
 at this commit, not never existed**. `scripts/verify_anchors.py` re-derives every
-backticked `file.py:LINE` claim from the checkout: **398 anchors resolve to real
+backticked `file.py:LINE` claim from the checkout: **405 anchors resolve to real
 files with in-range line numbers, 0 unresolved** (134 of them via a basename that
 appears in several directories, so the line was checked against each candidate).
 
@@ -126,8 +138,10 @@ src/rolloutcore/
   demo.py            Runnable no-GPU demonstration
   adapters/          fake_engine.py, fake.py (reference adapter),
                      http.py (lifecycle control plane over a real vLLM)
-tests/               226 tests, incl. the full 9x9 illegal-transition matrix
+tests/               234 tests, incl. the full 9x9 illegal-transition matrix
 docs/                Design and plan-delta documents
-scripts/test.sh      Dependency-free check runner
+scripts/live_control_plane_smoke.py  Phase 3A real-server harness (JSON artifact)
+scripts/test.sh            Dependency-free check runner
 scripts/verify_anchors.py  Re-derives the docs' vLLM file:LINE claims
+tests/fake_dev_server.py   Stub vLLM dev server, so 3A is rehearsed off-GPU
 ```

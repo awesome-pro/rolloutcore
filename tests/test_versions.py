@@ -30,7 +30,7 @@ from rolloutcore import (
     VersionError,
     WeightIdentity,
     WeightIdentityError,
-    WeightSource,
+    WeightProvenance,
     WeightVersion,
 )
 
@@ -164,7 +164,7 @@ class TestWeightIdentity(unittest.TestCase):
         self.assertEqual(WeightIdentity.from_pairs(PAIRS), WeightIdentity.from_pairs(PAIRS))
 
     def test_is_order_independent(self):
-        """A WeightSource need not enumerate in a stable order."""
+        """A trainer-side manifest need not enumerate in a stable order."""
         self.assertEqual(
             WeightIdentity.from_pairs(PAIRS),
             WeightIdentity.from_pairs(list(reversed(PAIRS))),
@@ -207,22 +207,24 @@ class TestWeightIdentity(unittest.TestCase):
         )
         self.assertNotEqual(
             ident.digest,
-            WeightIdentity.from_pairs([("a", "f16", (2, 2))], source=WeightSource(step=1)).digest,
+            WeightIdentity.from_pairs(
+                [("a", "f16", (2, 2))], source=WeightProvenance(step=1)
+            ).digest,
         )
 
 
-class TestWeightSource(unittest.TestCase):
+class TestWeightProvenance(unittest.TestCase):
     """Review item 4: provenance is what makes a trajectory claim specific."""
 
     def test_empty_source_is_rejected(self):
         with self.assertRaises(WeightIdentityError):
-            WeightSource()
+            WeightProvenance()
 
     def test_any_single_field_is_enough(self):
         for src in (
-            WeightSource(checkpoint="Qwen/Qwen3-1.7B-Base@main"),
-            WeightSource(run_id="run-7"),
-            WeightSource(step=0),
+            WeightProvenance(checkpoint="Qwen/Qwen3-1.7B-Base@main"),
+            WeightProvenance(run_id="run-7"),
+            WeightProvenance(step=0),
         ):
             with self.subTest(src=src):
                 self.assertTrue(src.canonical())
@@ -230,29 +232,29 @@ class TestWeightSource(unittest.TestCase):
     def test_bad_values_rejected(self):
         for bad in ({"checkpoint": ""}, {"run_id": ""}, {"step": -1}, {"step": True}):
             with self.subTest(bad=bad), self.assertRaises(WeightIdentityError):
-                WeightSource(**bad)  # type: ignore[arg-type]
+                WeightProvenance(**bad)  # type: ignore[arg-type]
 
     def test_canonical_omits_unset_fields(self):
         """``None`` must not leak into the digest as the string 'None'."""
-        self.assertEqual(WeightSource(step=5).canonical(), "step=5")
-        self.assertNotIn("None", WeightSource(step=5).canonical())
+        self.assertEqual(WeightProvenance(step=5).canonical(), "step=5")
+        self.assertNotIn("None", WeightProvenance(step=5).canonical())
 
     def test_two_training_steps_of_one_architecture_differ(self):
         """The exact hole the manifest digest left open."""
         manifest = [("model.embed_tokens.weight", "bfloat16", (151936, 2048))]
-        at_100 = WeightIdentity.from_pairs(manifest, source=WeightSource(step=100))
-        at_500 = WeightIdentity.from_pairs(manifest, source=WeightSource(step=500))
+        at_100 = WeightIdentity.from_pairs(manifest, source=WeightProvenance(step=100))
+        at_500 = WeightIdentity.from_pairs(manifest, source=WeightProvenance(step=500))
         self.assertNotEqual(at_100, at_500)
         self.assertEqual(at_100.manifest_digest, at_500.manifest_digest)
         self.assertEqual(at_100.exactness, "declared-source")
 
     def test_provenance_digest_covers_checkpoint_and_run_id(self):
         manifest = [("a", "f16", (2, 2))]
-        base = WeightIdentity.from_pairs(manifest, source=WeightSource(step=1))
+        base = WeightIdentity.from_pairs(manifest, source=WeightProvenance(step=1))
         for other in (
-            WeightSource(step=2),
-            WeightSource(step=1, run_id="r"),
-            WeightSource(step=1, checkpoint="ckpt"),
+            WeightProvenance(step=2),
+            WeightProvenance(step=1, run_id="r"),
+            WeightProvenance(step=1, checkpoint="ckpt"),
         ):
             with self.subTest(other=other):
                 self.assertNotEqual(base, WeightIdentity.from_pairs(manifest, source=other))
@@ -260,7 +262,7 @@ class TestWeightSource(unittest.TestCase):
     def test_source_rides_the_target(self):
         t = UpdateTarget(
             version=WeightVersion(3),
-            identity=WeightIdentity.from_pairs(PAIRS, source=WeightSource(step=42)),
+            identity=WeightIdentity.from_pairs(PAIRS, source=WeightProvenance(step=42)),
         )
         self.assertIn("step=42", t.describe())
         self.assertIn("rc-3", t.describe())

@@ -131,8 +131,8 @@ class HttpVLLMAdapter:
     report (it only knows an opaque version string), so the adapter is told it at
     bootstrap. A real integration computes it from the trainer's
     ``WeightSource.metadata()`` -- ideally with a
-    :class:`~rolloutcore.versions.WeightSource`, since a manifest alone cannot
-    distinguish two training steps of the same architecture.
+    :class:`~rolloutcore.versions.WeightProvenance`, since a manifest alone
+    cannot distinguish two training steps of the same architecture.
 
     ``driver`` supplies the trainer side of a weight update. It defaults to
     :class:`~rolloutcore.weight_transfer.LifecycleOnlyDriver`, which moves no

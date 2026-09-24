@@ -3,7 +3,7 @@
 **Phase 1 + Phase 2 (fake-engine cycle).** Pure Python, no vLLM import in the
 controller, no GPU.
 
-Source: `src/rolloutcore/` · Tests: `tests/` (226 tests)
+Source: `src/rolloutcore/` · Tests: `tests/` (234 tests)
 Run: `./scripts/test.sh` (no dependencies; also runs ruff + mypy when present)
 
 ---
@@ -246,13 +246,13 @@ a description of weights. `TestI4ReplayIdentity` asserts this directly.
 | Tier | Computed from | Distinguishes | `exactness` |
 |---|---|---|---|
 | Manifest-only | names, dtypes, shapes | architectures | `"manifest-only"` |
-| Provenance-qualified | the manifest **plus** `WeightSource(checkpoint, run_id, step)` | training steps | `"declared-source"` |
+| Provenance-qualified | the manifest **plus** `WeightProvenance(checkpoint, run_id, step)` | training steps | `"declared-source"` |
 
 A manifest digest is an *architecture* identity. Two checkpoints with the same
 tensors' names, dtypes and shapes — step 100 and step 500 of one run, or a base
 model and its fine-tune — produce the **same** manifest digest. That is the
 normal case in RL, not an edge case, so a manifest digest alone cannot support
-the claim "this trajectory came from step 500". `WeightSource` supplies the
+the claim "this trajectory came from step 500". `WeightProvenance` supplies the
 missing part, is rejected if empty (an empty source would silently degrade to a
 manifest-only identity), and is folded into the digest. `WeightIdentity.describe()`
 and `exactness` make the tier visible wherever it is logged.
@@ -262,7 +262,7 @@ and `exactness` make the tier visible wherever it is logged.
 digest over them. It does **not** claim the engine's memory byte-for-byte
 contains those tensors, and no tier here is a hash of tensor contents. The
 correspondence between a declaration and engine bytes is a differential/replay
-question, deliberately out of scope for V1 (`TestWeightSource` covers the
+question, deliberately out of scope for V1 (`TestWeightProvenance` covers the
 provenance semantics; §12 item 3 keeps content hashing open).
 
 `UpdateEvidence.observed_identity` is the one place the declaration is checked
@@ -425,8 +425,9 @@ behaviours the design depends on, each traced to its vLLM source.
 | `test_versions.py` | 45 | label round-trip, ordering, `WeightIdentity` canonicity, both identity tiers, `cache_salt` constraint |
 | `test_cycle.py` | 23 | **Phase 2**: full cycle over the fake engine, pause ordering, drain polling, pre-write bootstrap refusal, effect-vs-observation failure classification |
 | `test_http_adapter.py` | 39 | call sequences, query params, real vs. fabricated payloads, managed-engine refusal, drain reissue/budget, stub-driver round trip, port conformance |
+| `test_live_smoke.py` | 8 | the Phase 3A harness against `tests/fake_dev_server.py`: full pass, drain really waited, post-resume drift caught, warm-server refusal, in-process `mode=wait` rejection, and zero weight-transfer calls |
 
-226 tests. `ruff check`, `ruff format --check` and `mypy --strict` all pass on
+234 tests. `ruff check`, `ruff format --check` and `mypy --strict` all pass on
 the package; CI runs them on Python 3.11/3.12/3.13. The frozen-evidence
 immutability test asserts on a real dataclass *field* rather than a
 monkey-patched method, because on 3.11/3.12 the non-field path in a
@@ -443,9 +444,10 @@ the guarantee held, the assertion was version-dependent.
    only sanctioned driver?
 2. **Identity for the bootstrap weights.** `BootstrapEvidence.weight_identity` is
    supplied by the adapter, because the engine cannot report one. For a real
-   `vllm serve`, where should it come from — the trainer's
-   `WeightSource.metadata()` plus a `WeightSource`, the model loader's
-   `ParamMeta`, or the checkpoint's revision metadata?
+   `vllm serve`, where should it come from — vLLM's trainer-side
+   `WeightSource.metadata()` plus a `WeightProvenance`, the model loader's
+   `ParamMeta`, or the checkpoint's revision metadata? Phase 3A begins to answer
+   this empirically by recording what the adapter can actually observe.
 3. **Content hashing.** Even a provenance-qualified identity does not prove what
    the engine's memory holds: it identifies the *declared* source. Is per-tensor
    content hashing worth its cost in V2, or is a differential/replay check the
@@ -456,7 +458,10 @@ the guarantee held, the assertion was version-dependent.
 5. **A control-plane-only cycle.** The review's Phase 3A wants
    `drain → cache reset → validate → resume` with no weight change at all. The
    current table cannot express that (`QUIESCED` has exactly one outgoing edge,
-   to `UPDATING`), so Phase 3A currently has to bump the generation with an
-   unchanged identity and run a real no-op transfer. Should V1 add a
-   revalidation cycle (same target, caches dropped, no update), or is the
-   generation bump the better exercise of the data path?
+   to `UPDATING`). Phase 3A therefore runs at the **adapter** level and the
+   controller is deliberately tainted at the end, because the adapter resumed an
+   engine the controller cannot vouch for — see `docs/phase3a-runbook.md` and
+   `scripts/live_control_plane_smoke.py`. The open question stands: should V1 add
+   a revalidation edge (same committed target, caches dropped, no update), or
+   should every cache-revalidation be a generation bump with a real no-op
+   transfer?

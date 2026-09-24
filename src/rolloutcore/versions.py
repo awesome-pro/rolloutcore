@@ -22,8 +22,14 @@ Two distinct concepts live here, and keeping them apart is the point:
     * *manifest-only* (``from_param_specs(specs)``) -- names, dtypes and shapes.
       Distinguishes architectures; it does **not** distinguish two checkpoints
       of the same architecture, which is the common case between training steps.
-    * *provenance-qualified* (``source=WeightSource(...)``) -- the manifest plus
-      where it came from. This is what I4 actually needs.
+    * *provenance-qualified* (``source=WeightProvenance(...)``) -- the manifest
+      plus where it came from. This is what I4 actually needs.
+
+    The provenance type is deliberately **not** named ``WeightSource``: vLLM
+    already has a ``WeightSource`` ABC
+    (``vllm/distributed/weight_transfer/base.py:128``; ``ModuleSource`` at
+    ``:244``) meaning "the trainer-side object that yields named tensors", which
+    is a different concept and would collide at every use site.
 
     Neither tier is a byte-level hash of the tensors, and neither proves what the
     engine's memory contains. A trajectory states the **declared** source; the
@@ -162,7 +168,7 @@ class ParamSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class WeightSource:
+class WeightProvenance:
     """The *declared* origin of a weight set. Trusted, caller-supplied.
 
     This is the piece that turns a manifest digest into a usable replay claim. A
@@ -174,8 +180,13 @@ class WeightSource:
     ``checkpoint`` (a model/checkpoint URI with a revision, e.g.
     ``"Qwen/Qwen3-1.7B-Base@main"`` or a path to a run directory), ``run_id``
     (the trainer run) and ``step`` (the global step). At least one is required:
-    a ``WeightSource()`` with nothing in it would silently degrade a
+    a ``WeightProvenance()`` with nothing in it would silently degrade a
     provenance-qualified identity back to a manifest-only one.
+
+    Named ``Provenance`` rather than ``Source`` because vLLM's own
+    ``WeightSource`` (``vllm/distributed/weight_transfer/base.py:128``) is the
+    trainer-side iterable of named tensors. This class is metadata *about* that
+    source, so the two must not share a name.
     """
 
     checkpoint: str | None = None
@@ -185,15 +196,15 @@ class WeightSource:
     def __post_init__(self) -> None:
         for name, value in (("checkpoint", self.checkpoint), ("run_id", self.run_id)):
             if value is not None and (not isinstance(value, str) or not value):
-                raise WeightIdentityError(f"weight source {name} must be a non-empty string")
+                raise WeightIdentityError(f"weight provenance {name} must be a non-empty string")
         if self.step is not None and (
             not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 0
         ):
-            raise WeightIdentityError("weight source step must be a non-negative int")
+            raise WeightIdentityError("weight provenance step must be a non-negative int")
         if self.checkpoint is None and self.run_id is None and self.step is None:
             raise WeightIdentityError(
-                "weight source must declare at least one of checkpoint, run_id or step; "
-                "an empty source is a manifest-only identity in disguise"
+                "weight provenance must declare at least one of checkpoint, run_id or "
+                "step; an empty provenance is a manifest-only identity in disguise"
             )
 
     def canonical(self) -> str:
@@ -216,7 +227,7 @@ class WeightIdentity:
     """An immutable digest identifying the **declared weight source**.
 
     The digest covers the parameter manifest (names, dtypes, shapes) and, when a
-    :class:`WeightSource` is supplied, the declared provenance of that manifest.
+    :class:`WeightProvenance` is supplied, the declared provenance of that manifest.
 
     Deliberate limit, stated rather than implied away: this is **not** a hash of
     the tensor bytes, so it cannot detect a checkpoint whose manifest matches but
@@ -235,7 +246,7 @@ class WeightIdentity:
     #: "same architecture, different step" is still diagnosable.
     manifest_digest: str | None = None
     #: Declared origin. ``None`` means manifest-only.
-    source: WeightSource | None = None
+    source: WeightProvenance | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.digest, str) or not self.digest.startswith(DIGEST_PREFIX):
@@ -275,7 +286,7 @@ class WeightIdentity:
 
     @classmethod
     def from_param_specs(
-        cls, specs: Iterable[ParamSpec], *, source: WeightSource | None = None
+        cls, specs: Iterable[ParamSpec], *, source: WeightProvenance | None = None
     ) -> WeightIdentity:
         """Compute an identity from a parameter manifest, plus optional source.
 
@@ -323,7 +334,7 @@ class WeightIdentity:
         cls,
         pairs: Iterable[tuple[str, str, tuple[int, ...]]],
         *,
-        source: WeightSource | None = None,
+        source: WeightProvenance | None = None,
     ) -> WeightIdentity:
         """Convenience wrapper: ``(name, dtype, shape)`` triples."""
         return cls.from_param_specs((ParamSpec(*p) for p in pairs), source=source)

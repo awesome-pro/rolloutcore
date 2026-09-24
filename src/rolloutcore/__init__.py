@@ -60,7 +60,7 @@ from .versions import (
     VersionError,
     WeightIdentity,
     WeightIdentityError,
-    WeightSource,
+    WeightProvenance,
     WeightVersion,
 )
 from .weight_transfer import (
@@ -114,7 +114,7 @@ __all__ = [
     "VersionMismatchError",
     "WeightIdentity",
     "WeightIdentityError",
-    "WeightSource",
+    "WeightProvenance",
     "WeightTransferDriver",
     "WeightTransferInit",
     "WeightTransferNotConfiguredError",
