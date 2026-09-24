@@ -327,9 +327,18 @@ A hang is the normal symptom, so work through this list rather than guessing:
 | Transfer starts then stalls | the worker never entered the collective: check that `/init_weight_transfer_engine` actually returned on the server side |
 | OOM right after starting the trainer | the trainer landed on GPU 0 alongside vLLM — check `TRAINER_DEVICE` and `--device-ids` |
 | Works on one node but not another | PCIe topology; `NCCL_P2P_DISABLE=1` is the standard workaround (slower, still correct) |
+| `NCCL WARN Cuda failure 400 'invalid resource handle'` | **not** a transport or topology problem — the calling thread's current CUDA device. See §11. |
+| Trainer blocked forever, engine still answers `/health` | a receive-side OOM, or a kill inside a long collective. See §10. |
 
-Diagnostics: `NCCL_DEBUG=INFO` (add `NCCL_DEBUG_SUBSYS=INIT,COLL` for less noise),
-and set a finite `NCCL_TIMEOUT` so a hang fails instead of blocking forever.
+Diagnostics: `NCCL_DEBUG=INFO` (add `NCCL_DEBUG_SUBSYS=INIT,COLL` for less noise).
+
+**There is no `NCCL_TIMEOUT` to set.** This section used to recommend one; Phase 6
+disproved it. The trainer forms the group through vLLM's own
+`PyNcclCommunicator` (`nccl_engine.py:156` → `nccl_common.py:181`), the only
+timeout in that path is on *teardown* (`pynccl.py:237`), and there is no
+`NCCL_TIMEOUT`-style knob anywhere in the tree. A blocked collective does not fail;
+it blocks. Bound it from outside — the harnesses here use their own budget plus
+`os._exit` — and never plan on the trainer noticing.
 
 ## 9. Cost, and what to send back
 
@@ -345,3 +354,125 @@ Send back from the 2-GPU session:
 3. Both generations (before/after) verbatim.
 4. `NCCL_DEBUG=INFO` output if anything hung.
 5. Whether `--quantization fp8` was dropped and `mode=wait` used.
+
+---
+
+## 10. Addendum — findings from Phases 4C–6 (all measured on the 2-GPU pod)
+
+Four ways this setup fails that are not in the list above, because they were not
+known until the later phases measured them. The first three are properties of the
+concurrent broadcast; the fourth is a property of our own code (see §11).
+
+| Symptom | What it actually is | What to do |
+|---|---|---|
+| Trainer blocked forever, engine alive and answering `/health` | a **receive-side OOM** raised in the server, or a kill inside a long collective | read the server log for `CUDA out of memory`; leave memory headroom (§10.1) |
+| A kill during the update never returns | there is **no timeout** on the trainer's collective (§10.2) | bound it from outside the trainer |
+| OOM only on models bigger than ~1 GB | the **KV cache is sized with no headroom** for transfer buffers (§10.3) | `--gpu-memory-utilization 0.6`, `--packed-num-buffers 1` |
+| A drain fails and the controller sits in `DRAINING` untainted | a failed read is deliberately not a taint (`src/rolloutcore/runner.py:213`) | check `/health` before assuming the engine is merely paused (`docs/phase4b-results.md`) |
+
+### 10.1 An OOM in a concurrent broadcast presents as a hang
+
+The 8B run's first failure, verbatim from the engine log:
+
+```
+CUDA out of memory. Tried to allocate 1.16 GiB. GPU 0 has 531.00 MiB free.
+```
+
+That 1.16 GiB is the receive buffer for the 1.24 GB embedding tensor. The engine
+logs the OOM and **stays alive** — `/health` keeps returning 200, the process does
+not exit — while the trainer, already inside the collective, blocks forever.
+`complete_weight_update` never returns, so RolloutCore is never told anything
+happened and the controller sits in `UPDATING` with no taint. There is no
+client-side error to catch; the only evidence is the server log.
+
+If a transfer hangs, read the engine log **first**, before the NCCL checklist
+above.
+
+### 10.2 The collective has no timeout
+
+The trainer joins through vLLM's `PyNcclCommunicator` (`nccl_engine.py:156` →
+`nccl_common.py:181`). The only timeout in that path is on teardown, and the
+source's own comment says a failed join "leaves the peer blocked in
+`ncclCommInitRank` until timeout" (`pynccl.py:237`). Nothing bounds the collective
+itself, so the observable behaviour depends on the length of the broadcast:
+
+| Broadcast | Kill inside it | Observed result |
+|---|---|---|
+| 0.10 s (125M) | kill at 0.154 s, aimed at 0.050 s | `EngineTaintedError` in **0.1738 s**, controller `TAINTED` |
+| 4.13 s (8B) | kill at 2.174 s, aimed at 2.063 s (≈53% through) | **never returned**: 120.2254 s was the harness's own budget, `outcome: null`, controller stuck in `UPDATING`, `tainted: false` |
+
+The 8B number is not a failure that took 120 s. It is the harness terminating
+itself with `os._exit` after its budget, because the path underneath has no bound
+of its own. Phase 4D's fast 0.1767 s detection is the same code path in the narrow
+regime; do not generalise it to bigger models.
+
+**Operational rule:** any process that drives a broadcast needs its own watchdog
+and its own way to exit. Do not wait for the trainer to fail, and do not expect a
+taint — if the broadcast never returns, RolloutCore never learns that anything
+changed, which is exactly the state that needs an operator.
+
+### 10.3 The KV cache is sized with no room for the transfer
+
+vLLM allocates the KV cache to fill `--gpu-memory-utilization` at startup and
+reserves **nothing** for the weight-transfer receive buffers, which the packed
+consumer allocates lazily per chunk (`torch.empty(packing_tensor_sizes[buffer_idx])`).
+At 125M this is invisible: a ~250 MB model fits inside one sub-buffer chunk. A
+16 GB checkpoint streams ~16 chunks of ~1 GiB, and the first chunk that does not
+fit turns into §10.1.
+
+The harnesses now start the server with `--gpu-memory-utilization 0.6` and
+`--max-model-len` clamped to the checkpoint's own `max_position_embeddings`; the
+8B runs additionally use `--packed-num-buffers 1` so only one receive buffer is
+live at a time. This is configuration, not a fix in vLLM — the engine has no way
+to know a trainer is about to land gigabytes on it.
+
+### 10.4 Checklist before blaming the environment
+
+1. Engine log: any `CUDA out of memory`, any traceback.
+2. Is `/health` still 200 while the trainer is blocked? Then the engine is alive
+   and the problem is downstream of the collective, not the transport.
+3. How long was the broadcast supposed to take? Compare the kill/observation time
+   against it — under a second, expect an error; multi-second, expect a hang.
+4. Free GPU memory on the inference card right after startup.
+5. Only then the transport: `NCCL_DEBUG=INFO`, ports, `world_size`.
+
+## 11. The thread-local device trap
+
+Five consecutive pod runs — two transports, three model sizes, one fresh
+container — failed identically:
+
+```
+NCCL WARN Cuda failure 400 'invalid resource handle'
+```
+
+It was the harness, and the error names neither the device nor the thread.
+
+**Cause.** PyTorch's current CUDA device is **thread-local**. A newly spawned
+thread starts on device 0. The harness runs the cycle on a daemon thread (to bound
+a hang), and that thread defaulted to device 0 while the model, the KV cache and
+the NCCL communicator had been created on device 1. vLLM's packed producer builds
+its CUDA streams from `torch.accelerator.current_device_index()`
+(`packed_tensor.py:23-24`), so a GPU-1 broadcast was issued on GPU-0 streams. NCCL
+reports `invalid resource handle` and nothing else.
+
+**Two theories that were wrong, retracted here so nobody re-runs them:** a
+`/dev/shm` sizing problem, and `NCCL_P2P_DISABLE`. P2P is disabled by topology on
+this host and always was; the transport line (`SHM/direct/direct`, or
+`NET/Socket/0` with `NCCL_SHM_DISABLE=1`) was never the issue.
+
+**The rule.** Any thread that touches CUDA must set its own device first:
+
+```python
+torch.cuda.set_device(TRAINER_DEVICE_INDEX)   # at the top of the thread
+```
+
+`torch.cuda.set_device` is thread-local too, so this must be done *in* the thread,
+not just on the main thread before spawning it.
+
+**The guard.** `NCCLWeightTransferDriver.initialize()` records the device it
+rendezvoused on; `transfer()` compares it with the calling thread's and raises
+`WeightTransferNotConfiguredError` naming both devices, the cause and the fix —
+before any request is sent. The comparison is a pure function,
+`device_mismatch(initialized_on, current)`, so it is tested with no GPU and no
+torch, and `tests/test_nccl_driver.py::TestThreadDeviceRule` pins the thread rule.
+The harnesses set the device at the top of both transfer threads.

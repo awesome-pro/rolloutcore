@@ -11,6 +11,10 @@ answer "is the pod's NCCL fine?" separately from "is our driver fine?".
 | `rolloutcore_cycle_2gpu.py` | Phase 3C: the same setup, but the update runs through `LifecycleRunner.run_cycle` and the real `NCCLWeightTransferDriver` |
 | `rolloutcore_concurrency_2gpu.py` | Phase 4A: a generation spans the update, and must come out of it unchanged — the "one version per rollout" invariant, which no vLLM API enforces |
 | `rolloutcore_failures_2gpu.py` | Phase 4B: the failure paths against a real engine — a failed drain, an identity mismatch, a SIGKILLed engine, and recovery — over three engine lifetimes |
+| `rolloutcore_cache_2gpu.py` | Phase 4C: no cross-version KV reuse, asserted through the public prefix-cache metrics, plus a negative control that *makes* the reuse happen to show the reset step is load-bearing |
+| `rolloutcore_updatekill_2gpu.py` | Phase 4D: SIGKILL the engine at the moment the controller enters `UPDATING`, and measure how the failure surfaces |
+| `rolloutcore_trajectory_2gpu.py` | Phase 5: a trajectory that names the training step, not just the architecture — the record for a rollout that spans an update |
+| `rolloutcore_benchmark_2gpu.py` | Phase 6: the hot-update cycle against a restart baseline, plus a kill aimed inside a multi-second broadcast |
 
 ## `upstream_nccl_2gpu.py`
 
@@ -44,9 +48,10 @@ gibberish), broadcasts the real weights over NCCL, and generates again (expect
 plausible text). The text change is the proof that the transport works.
 
 If it hangs, that is diagnostic information, not a RolloutCore bug — see
-`docs/phase3b-runbook.md` §7 for the NCCL hang checklist. Re-run with
-`NCCL_DEBUG=INFO` and a finite `NCCL_TIMEOUT` so a hang fails instead of
-blocking forever.
+`docs/phase3b-runbook.md` §8 for the NCCL hang checklist and §10–11 for the
+failure modes found later. Re-run with `NCCL_DEBUG=INFO`. Do **not** reach for
+`NCCL_TIMEOUT`: nothing in this path honours one, and a blocked collective has to
+be bounded from outside the trainer (`docs/phase3b-runbook.md` §10.2).
 
 ## `rolloutcore_concurrency_2gpu.py`
 
@@ -101,7 +106,7 @@ would not exercise the failure.
 C separates two paths that behave differently, which is the point of the phase:
 
 * the **drain** path goes through `_observe`, which deliberately does not taint a
-  failed read (`runner.py:213`) — the engine is paused during DRAINING, so it
+  failed read (`src/rolloutcore/runner.py:213`) — the engine is paused during DRAINING, so it
   cannot serve anything new. That reasoning still holds for a dead engine, so the
   controller is left in DRAINING, untainted, and the harness **records** what that
   costs rather than asserting it;
@@ -117,6 +122,110 @@ python3 diagnostics/rolloutcore_failures_2gpu.py
 Takes a few minutes and produces `results/phase4b.json` plus one server log per
 lifetime (`phase4b-server-{1,2,3}.log`). Each scenario records its own checks, so
 a failure part-way still leaves a useful artifact.
+
+## `rolloutcore_cache_2gpu.py`
+
+Two phases in one run, because a passing "no reuse" assertion is only as good as
+the proof that reuse *could* have happened.
+
+**Phase 1 — the guarantee, and it gates.** With prefix caching on by default, `P`
+is sent twice at `rc-0` to show the cache is real and measurable, a full cycle
+installs `rc-1`, then `P` is sent again. The first post-update request must score
+**zero** new cache hits (`vllm:prefix_cache_hits_total` /
+`vllm:prefix_cache_queries_total`, read from the engine's own metrics — not from
+RolloutCore's bookkeeping), and a second request must score hits again, or "no
+reuse" would be indistinguishable from caching being off.
+
+**Phase 2 — the hazard, recorded rather than asserted.** The trainer's first
+decoder layer is negated in place and the update is driven entirely out of band:
+`/pause?mode=wait&clear_cache=false`, broadcast, `/resume`. No controller, no
+reset. If the old KV is still handed back — and it is, 32 hits — then the
+`INVALIDATING` step is load-bearing rather than belt-and-braces. The negated
+weights also keep the *same* manifest digest, which is the manifest-only blind
+spot item 5 exists to fix, measured rather than argued.
+
+```bash
+pkill -f "vllm serve"; sleep 3
+python3 diagnostics/rolloutcore_cache_2gpu.py
+```
+
+## `rolloutcore_updatekill_2gpu.py`
+
+A healthy cycle first (which also times a real update), then a second cycle whose
+engine process group is SIGKILLed the instant `ctrl.state` reads `UPDATING`. The
+watcher runs on the main thread; the cycle runs on a daemon thread whose NCCL
+session is bounded by the harness's own detection budget and `os._exit`, so a
+blocked collective costs the budget instead of hanging the pod.
+
+At 125M the whole update is ~100 ms, so the kill lands at its *edge* — the HTTP
+calls around the collective — and detection is prompt (0.177 s,
+`ConnectionResetError(104)`). Whether a kill *inside* a long collective is even
+survivable is the benchmark's question, not this script's; the checks here gate
+only on the fail-closed properties (nothing published, no rollout admissible,
+engine dead), and whether the outcome arrived as a taint or a hang is recorded.
+
+```bash
+pkill -f "vllm serve"; sleep 3
+python3 diagnostics/rolloutcore_updatekill_2gpu.py
+```
+
+## `rolloutcore_trajectory_2gpu.py`
+
+Phase 4A's shape with provenance added, because 4A produced the case that makes
+the whole record design necessary: a rollout admitted at `rc-0` that finishes
+*after* the update to `rc-1`, so the engine reports `rc-1` for tokens that came
+entirely from `rc-0`. The run asserts that divergence on purpose — the record
+keeps `rc-0`, the engine's last word is `rc-1`, and the output (256 copies of
+token id `0`) corroborates that the spanned rollout really ran on the dummy
+weights.
+
+It also needs `NCCLWeightTransferDriver.declare`, because a driver whose cached
+identity cannot follow weights that changed has no way to re-declare what it is
+about to install. Writes `results/phase5-trajectories.jsonl`; the provenance is
+**declared**, which is the honest word — nothing here verifies a weight byte, and
+`replay_ready` means the record *can support* a replay claim, not that one has
+been made.
+
+```bash
+pkill -f "vllm serve"; sleep 3
+python3 diagnostics/rolloutcore_trajectory_2gpu.py
+```
+
+## `rolloutcore_benchmark_2gpu.py`
+
+Three engine lifetimes: **L1** the hot path with a state watcher so the cycle
+decomposes into per-state dwell times, **L2** the restart baseline (kill, restart
+on the same checkpoint, time to `/health` and to the first token), and **L3** a
+kill aimed at half of L1's measured update duration — inside the collective on a
+model whose broadcast is seconds wide.
+
+L2 is deliberately generous to the baseline: it assumes the checkpoint is already
+on disk and does not count the write a real restart-based update needs, so the
+ratio is a floor on the hot path's advantage. At 125M that ratio is 130.63×; at
+8B it is 8.71×, because the restart costs ~30 s of near-fixed startup while the
+hot path scales with the payload.
+
+In L3, whether the failure surfaced or hung is **recorded, not gated**
+(`detail.deep_kill.verdict`): a hang there is an observation about vLLM, and a
+FAIL should mean the benchmark failed. Fail-closed checks still gate.
+
+| Flag | Why |
+|---|---|
+| `--model` | the only knob that changes the payload (default `facebook/opt-125m`) |
+| `--skip-deep-kill` | L1 + L2 only — the clean 6/6 artifact |
+| `--packed-buffer-gib` / `--packed-num-buffers` | receive-buffer sizing; `1` buffer is what makes an 8B fit |
+| `--gpu-memory-utilization` | default 0.6, raised to 0.75 for 8B: leave the transfer room (see runbook §10.3) |
+| `--max-model-len` | default 4096, **clamped** to the checkpoint's own `max_position_embeddings` |
+| `--transfer-budget` | default 180 s; the harness's own bound on the broadcast |
+
+```bash
+pkill -f "vllm serve"; sleep 3
+python3 diagnostics/rolloutcore_benchmark_2gpu.py --model Qwen/Qwen3-8B --skip-deep-kill
+```
+
+Artifacts: `results/phase6.json` (125M, 11/11), `results/phase6-8b.json` (8B,
+6/6), `results/phase6-8b-with-deepkill.json` (8B, 10/11 — the pre-fix artifact
+whose eleventh check was the hang, since made non-gating).
 
 This directory is deliberately outside the *type*-check scope: `scripts/test.sh`
 runs `ruff` over it, but not `mypy`, because these files import `torch`,

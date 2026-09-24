@@ -72,9 +72,9 @@ not a RolloutCore transition — see the finding below.
 The engine's whole process group is SIGKILLed, then a cycle is attempted.
 
 **C1 — the drain path does not taint.** This was predicted from reading
-`_observe` (`runner.py:213`: reads are deliberately never tainted, because during
-DRAINING the engine is paused and a failed read leaves nothing ambiguous), and the
-run confirms it:
+`_observe` (`src/rolloutcore/runner.py:213`: reads are deliberately never
+tainted, because during DRAINING the engine is paused and a failed read leaves
+nothing ambiguous), and the run confirms it:
 
 ```
 error     DrainFailedError: drain did not complete after 3 attempt(s); last error:
@@ -144,11 +144,12 @@ named the invariant, the state, and in two cases the missing upstream feature.
 
 ## What Phase 4B does *not* prove
 
-- **No mid-update kill.** C kills the engine *before* the cycle, deliberately: a
-  kill during the NCCL broadcast could hang the rendezvous for its full timeout
-  rather than failing, which would cost more than it measures. Failure *detection*
-  during a transfer is therefore untested, and worth its own scenario with a
-  bounded `NCCL_TIMEOUT`.
+- **No mid-update kill.** C kills the engine *before* the cycle. A kill during the
+  broadcast could hang the rendezvous rather than fail, and that is what Phases 4D
+  and 6 went on to measure: 4D landed one at the update's edge and got a taint in
+  0.177 s, while 6 landed one *inside* an 8B collective and it never returned. The
+  bounded `NCCL_TIMEOUT` this section originally suggested does not exist in that
+  path — see `docs/phase3b-runbook.md` §10.2.
 - **Not a dead engine under load.** C1 has no in-flight rollouts; A's drain
   failure does. The two are not combined.
 - **`opt-125m`, one node, TP=1.**
