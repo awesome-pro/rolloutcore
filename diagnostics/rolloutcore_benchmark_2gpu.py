@@ -92,7 +92,14 @@ SAMPLE_S = 0.02
 # ------------------------------------------------------------------- server
 
 
-def start_server(model: str, log_name: str, *, dummy: bool) -> subprocess.Popen[str]:
+def start_server(
+    model: str,
+    log_name: str,
+    *,
+    dummy: bool,
+    gpu_memory_utilization: float,
+    max_model_len: int,
+) -> subprocess.Popen[str]:
     args = [
         "vllm",
         "serve",
@@ -106,6 +113,16 @@ def start_server(model: str, log_name: str, *, dummy: bool) -> subprocess.Popen[
         str(SERVER_PORT),
         "--weight-transfer-config",
         '{"backend": "nccl"}',
+        # Both of these exist to leave room for the weight-transfer receive
+        # buffers. vLLM sizes the KV cache to fill the budget and does not reserve
+        # any for them, and the packed consumer allocates per chunk, lazily:
+        # `torch.empty(packing_tensor_sizes[buffer_idx])`. Qwen3-8B OOM'd on a
+        # 1.16GiB receive against 531MiB free, which the trainer -- already inside
+        # the broadcast -- experienced as a hang rather than an error.
+        "--gpu-memory-utilization",
+        str(gpu_memory_utilization),
+        "--max-model-len",
+        str(max_model_len),
     ]
     if dummy:
         args += ["--load-format", "dummy"]
@@ -365,6 +382,18 @@ def main() -> int:
         help="override NCCLTrainerInitInfo.packed_buffer_size_bytes (default 1GiB)",
     )
     ap.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.6,
+        help="lower than the 0.9 default on purpose: reserve room for transfer buffers",
+    )
+    ap.add_argument(
+        "--max-model-len",
+        type=int,
+        default=4096,
+        help="keeps the KV cache small, so the transfer buffers have somewhere to go",
+    )
+    ap.add_argument(
         "--transfer-budget",
         type=float,
         default=180.0,
@@ -380,6 +409,8 @@ def main() -> int:
         "packed_buffer_bytes": packed_bytes,
         "transfer_budget_seconds": args.transfer_budget,
         "drain_interval_seconds": DRAIN_INTERVAL_S,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "max_model_len": args.max_model_len,
     }
     sha, dirty = git_revision()
     report["started_at"] = datetime.now(UTC).isoformat(timespec="seconds")
@@ -396,7 +427,13 @@ def main() -> int:
         nonlocal current
         if current is not None:
             _terminate(current)
-        current = start_server(model, log_name, dummy=dummy)
+        current = start_server(
+            model,
+            log_name,
+            dummy=dummy,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            max_model_len=args.max_model_len,
+        )
         return current
 
     try:
@@ -454,6 +491,10 @@ def main() -> int:
             }
             print(f"[hot] HUNG for {args.transfer_budget}s; states: {detail['hot_hang']['states']}")
             record(checks, "hot_path_did_not_hang", False)
+            # os._exit skips the finally block, so the engine has to be stopped
+            # here or it keeps port 8000 and the next lifetime cannot bind.
+            if current is not None:
+                _terminate(current)
             _write(report, detail, checks)
             print("[exit] os._exit to bound the cost of a blocked collective")
             sys.stdout.flush()
