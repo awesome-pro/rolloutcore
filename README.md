@@ -10,39 +10,36 @@ rollout(vN) → drain → update(vN+1) → invalidate stale cache → resume →
 
 while binding every trajectory to the exact weight version that produced it.
 
-> **Status: Phase 1 complete** — the pure-Python lifecycle state machine and its
-> tests (103 tests, no dependencies). The real-vLLM adapter is Phase 2, gated on
-> review of `docs/state-machine.md`.
+> **Status: Phases 1–2 complete** — the lifecycle state machine, the typed
+> adapter port, a stdlib HTTP adapter, and a full `READY → … → READY` cycle
+> against an in-memory fake engine. Real-GPU work (Phase 3) has not started.
 
 ---
 
 ## Quick start
 
 ```bash
-./scripts/test.sh
+./scripts/test.sh          # tests + ruff + mypy
+./scripts/test.sh --fast   # tests only
+python -m rolloutcore.demo # full cycle, fake engine, no GPU
 ```
 
-Phase 1 is pure stdlib on Python ≥ 3.11 — nothing to install. With pytest
-available it uses that instead.
+Pure stdlib on Python ≥ 3.11 — nothing to install. `scripts/test.sh` picks up
+`.venv` if present, and degrades gracefully when pytest/ruff/mypy are absent.
 
 ```python
-from rolloutcore import LifecycleController, WeightVersion, BootstrapEvidence
+from rolloutcore import LifecycleController, LifecycleRunner
+from rolloutcore.adapters import FakeVLLMAdapter, FakeVLLMEngine, manifest_identity
 
+engine = FakeVLLMEngine()
+engine.seed_fresh_with(manifest_identity("A"))     # fresh, unmanaged label
 ctrl = LifecycleController()
-ctrl.initialize(BootstrapEvidence(
-    observed_engine_label="rc-0", weight_transfer_initialised=True,
-    seeded=True, pre_seed_label="default",
-))
+runner = LifecycleRunner(ctrl, FakeVLLMAdapter(engine), sleep=lambda _s: None)
 
-binding = ctrl.admit_rollout("req-1")     # bound to rc-0, frozen
-ctrl.finish_rollout("req-1")
-
-ctrl.begin_drain()                              # READY -> DRAINING
-ctrl.confirm_drained(drain_evidence)            # requires proven zero active work
-ctrl.begin_update(WeightVersion(1))
-ctrl.confirm_updated(update_evidence)
-ctrl.confirm_invalidated(invalidate_evidence)   # all three caches, or taint
-ctrl.confirm_validated(validate_evidence)       # commits rc-1
+runner.bootstrap()                                 # -> READY at rc-0
+binding = ctrl.admit_rollout("R1")                 # bound to rc-0 + identity A
+ctrl.finish_rollout("R1")
+runner.install_next(manifest_identity("B"))        # -> READY at rc-1
 ```
 
 ---
@@ -51,8 +48,8 @@ ctrl.confirm_validated(validate_evidence)       # commits rc-1
 
 | File | What it is |
 |---|---|
-| `PROJECT.md` | Project brief: why it exists, invariants, roadmap |
-| `docs/state-machine.md` | **Phase 1 design, for review** — states, transitions, failure policy, open questions |
+| `PROJECT.md` | Project brief: why it exists, invariants, roadmap, upstream-contribution policy |
+| `docs/state-machine.md` | **Design** — states, transitions, failure policy, adapter port, fake-engine fidelity |
 | `docs/plan-delta.md` | Original plan vs. source-map findings vs. implementation amendments |
 | `source-map-vllm-main.md` | Source-level map of vLLM `main`: 9 subsystems, every claim anchored to `file:LINE`, plus an RFC cross-check |
 | `mvp-plan.md` | The minimal real-vLLM cycle: exact HTTP call sequence, integration surface, guardrails |
@@ -67,7 +64,7 @@ Suggested read order: `PROJECT.md` → `docs/plan-delta.md` → `docs/state-mach
 ## Why this exists
 
 Two guarantees matter most for RL correctness, and **neither has engine-side
-support in vLLM `main`** as of the commit audited:
+support in vLLM `main`** as of the commit audited (details in `PROJECT.md`):
 
 1. **One weight version per rollout.** PR #49040 added a `weight_version` query
    API but *deliberately removed* binding a version to `Request`/`RequestOutput`,
@@ -107,11 +104,15 @@ resolve to real files with in-range line numbers.
 
 ```
 src/rolloutcore/
-  versions.py    WeightVersion: the counter vLLM does not keep, + cache_salt
-  evidence.py    Postconditions reported by the (future) adapter
-  errors.py      InvariantViolation (retryable) vs EngineTaintedError (terminal)
-  lifecycle.py   The state machine
-tests/           103 tests — legal transitions, the full 8x8 illegal matrix, I1-I9
+  versions.py    WeightVersion (rc-N generation) + WeightIdentity (manifest digest)
+  evidence.py    Postconditions reported by the adapter
+  errors.py      IllegalTransition vs InvariantViolation vs EvidenceNotReady vs Taint
+  lifecycle.py   The 9-state machine — no I/O
+  port.py        LifecycleAdapter: the typed adapter contract
+  runner.py      Drives a cycle using typed adapter methods
+  demo.py        Runnable no-GPU demonstration
+  adapters/      fake_engine.py, fake.py (reference adapter), http.py (real vLLM)
+tests/           196 tests, incl. the full 9x9 illegal-transition matrix
 docs/            Design and plan-delta documents
-scripts/test.sh  Dependency-free test runner
+scripts/test.sh  Dependency-free check runner
 ```

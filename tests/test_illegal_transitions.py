@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """Every illegal transition, enumerated as the full cartesian product.
 
-``LifecycleState`` has 8 members and ``Event`` has 8 members, so there are 64
-(state, event) pairs. Seven are forward edges, ``taint`` is legal from every
-state (absorbing at TAINTED), and the remaining 49 are illegal. Rather than
+``LifecycleState`` has 9 members and ``Event`` has 9 members, so there are 81
+(state, event) pairs. Eight are forward edges, ``taint`` is legal from every
+state (absorbing at TAINTED), and the remaining 64 are illegal. Rather than
 hand-listing them, this module derives the expectation from the table and
-asserts it for all 64 -- so adding a state or an event without updating the
+asserts it for all 81 -- so adding a state or an event without updating the
 design immediately shows up as failures here rather than as silent gaps.
 
 Illegality is also asserted *strongly*: a rejected event must leave the
-controller observably untouched (state, versions, active rollouts, journal).
+controller observably untouched (state, targets, active rollouts, orphans,
+journal).
 """
 
 from __future__ import annotations
 
 import unittest
+
+from support import assert_state_unchanged, drive_to, good_drain, invoke
 
 from rolloutcore import (
     ADMITTING_STATES,
@@ -25,9 +28,7 @@ from rolloutcore import (
     LifecycleState,
     NotServingError,
     UnknownRolloutError,
-    enumerate_transition_matrix,
 )
-from support import GOOD_DRAIN, assert_state_unchanged, drive_to, invoke
 
 
 def _is_legal(state: LifecycleState, event: Event) -> bool:
@@ -39,30 +40,35 @@ def _is_legal(state: LifecycleState, event: Event) -> bool:
 
 class TestIllegalTransitionMatrix(unittest.TestCase):
     def test_matrix_is_complete(self):
-        """8 states x 8 events, with no duplicates."""
+        from rolloutcore import enumerate_transition_matrix
+
         matrix = enumerate_transition_matrix()
         self.assertEqual(len(matrix), len(LifecycleState) * len(Event))
         self.assertEqual(len(set(matrix)), len(matrix))
+        self.assertEqual(len(matrix), 81)
 
     def test_expected_legal_and_illegal_counts(self):
+        from rolloutcore import enumerate_transition_matrix
+
         pairs = enumerate_transition_matrix()
         legal = [p for p in pairs if _is_legal(*p)]
         illegal = [p for p in pairs if not _is_legal(*p)]
-        # 7 forward edges + taint legal from all 8 states (a no-op at TAINTED).
-        self.assertEqual(len(legal), 7 + len(LifecycleState))
-        self.assertEqual(len(illegal), 64 - len(legal))
-        self.assertEqual(len(illegal), 49)
+        # 8 forward edges + taint legal from all 9 states.
+        self.assertEqual(len(legal), 8 + len(LifecycleState))
+        self.assertEqual(len(legal), 17)
+        self.assertEqual(len(illegal), 81 - len(legal))
+        self.assertEqual(len(illegal), 64)
 
     def test_every_pair_behaves_as_specified(self):
+        from rolloutcore import enumerate_transition_matrix
+
         for state, event in enumerate_transition_matrix():
             with self.subTest(state=state.value, event=event.value):
                 ctrl = drive_to(state)
                 if _is_legal(state, event):
                     invoke(ctrl, event)  # must not raise
                 else:
-                    exc = assert_state_unchanged(
-                        self, ctrl, lambda c=ctrl, e=event: invoke(c, e)
-                    )
+                    exc = assert_state_unchanged(self, ctrl, lambda c=ctrl, e=event: invoke(c, e))
                     self.assertIsInstance(
                         exc,
                         IllegalTransitionError,
@@ -73,37 +79,35 @@ class TestIllegalTransitionMatrix(unittest.TestCase):
                     self.assertEqual(exc.event, event.value)
 
     def test_illegal_transition_message_is_actionable(self):
-        """The error names both the state and the event, for debuggability."""
         ctrl = drive_to(LifecycleState.READY)
-        exc = assert_state_unchanged(
-            self, ctrl, lambda: ctrl.confirm_drained(GOOD_DRAIN)
-        )
+        exc = assert_state_unchanged(self, ctrl, lambda: ctrl.confirm_drained(good_drain()))
         self.assertIsInstance(exc, IllegalTransitionError)
         self.assertEqual(exc.invariant, "T-ILLEGAL")
-        self.assertEqual(exc.state, LifecycleState.READY.value)
-        self.assertEqual(exc.event, Event.CONFIRM_DRAINED.value)
         self.assertIn("confirm_drained", str(exc))
         self.assertIn("READY", str(exc))
 
     def test_tainted_is_absorbing_for_every_forward_event(self):
-        """No forward edge exists out of TAINTED."""
+
         forward = [e for e in Event if e is not Event.TAINT]
         for event in forward:
             with self.subTest(event=event.value):
                 ctrl = drive_to(LifecycleState.TAINTED)
-                exc = assert_state_unchanged(
-                    self, ctrl, lambda c=ctrl, e=event: invoke(c, e)
-                )
+                exc = assert_state_unchanged(self, ctrl, lambda c=ctrl, e=event: invoke(c, e))
                 self.assertIsInstance(exc, IllegalTransitionError)
 
     def test_no_edge_targets_tainted_implicitly(self):
-        """TAINTED is only ever reached through taint(), never a table edge."""
         self.assertNotIn(LifecycleState.TAINTED, set(LEGAL_TRANSITIONS.values()))
 
     def test_no_edge_leaves_tainted(self):
-        self.assertEqual(
-            [k for k in LEGAL_TRANSITIONS if k[0] is LifecycleState.TAINTED], []
+        self.assertEqual([k for k in LEGAL_TRANSITIONS if k[0] is LifecycleState.TAINTED], [])
+
+    def test_no_edge_skips_the_resume_state(self):
+        """Amendment 1: VALIDATING must lead to RESUMING, never straight to READY."""
+        self.assertIs(
+            LEGAL_TRANSITIONS[(LifecycleState.VALIDATING, Event.CONFIRM_VALIDATED)],
+            LifecycleState.RESUMING,
         )
+        self.assertNotIn((LifecycleState.VALIDATING, Event.CONFIRM_RESUMED), LEGAL_TRANSITIONS)
 
 
 class TestRolloutAdmissionAcrossStates(unittest.TestCase):
@@ -117,30 +121,20 @@ class TestRolloutAdmissionAcrossStates(unittest.TestCase):
                     binding = ctrl.admit_rollout("r1")
                     self.assertEqual(binding.request_id, "r1")
                 else:
-                    exc = assert_state_unchanged(
-                        self, ctrl, lambda c=ctrl: c.admit_rollout("r1")
-                    )
+                    exc = assert_state_unchanged(self, ctrl, lambda c=ctrl: c.admit_rollout("r1"))
                     self.assertIsInstance(exc, NotServingError)
-                    # Rejecting a request is normal operation, not an engine
-                    # fault: it must not *cause* a taint (it may already be in
-                    # one, which is why the assertion is conditional).
                     if state is not LifecycleState.TAINTED:
                         self.assertNotEqual(ctrl.state, LifecycleState.TAINTED)
 
-    def test_unknown_rollout_completion_is_rejected(self):
+    def test_unknown_rollout_completion_across_states(self):
         for state in LifecycleState:
             with self.subTest(state=state.value):
                 ctrl = drive_to(state)
                 for method in (ctrl.finish_rollout, ctrl.abort_rollout):
+                    exc = assert_state_unchanged(self, ctrl, lambda m=method: m("never-admitted"))
                     if state in ROLLOUT_COMPLETION_STATES:
-                        exc = assert_state_unchanged(
-                            self, ctrl, lambda m=method: m("never-admitted")
-                        )
                         self.assertIsInstance(exc, UnknownRolloutError)
                     else:
-                        exc = assert_state_unchanged(
-                            self, ctrl, lambda m=method: m("never-admitted")
-                        )
                         self.assertIsInstance(exc, IllegalTransitionError)
 
     def test_double_completion_is_rejected(self):
@@ -155,6 +149,28 @@ class TestRolloutAdmissionAcrossStates(unittest.TestCase):
         ctrl.admit_rollout("r1")
         exc = assert_state_unchanged(self, ctrl, lambda: ctrl.admit_rollout("r1"))
         self.assertEqual(exc.invariant, "I2-BINDING")
+
+    def test_rollouts_cannot_complete_during_resuming(self):
+        """RESUMING is not a completion state; only READY and DRAINING are."""
+        ctrl = drive_to(LifecycleState.READY)
+        ctrl.admit_rollout("r1")
+        ctrl.finish_rollout("r1")
+        self.assertEqual(ROLLOUT_COMPLETION_STATES, {LifecycleState.READY, LifecycleState.DRAINING})
+
+
+class TestEvidenceNotReadyIsNotIllegal(unittest.TestCase):
+    """A still-running drain is a retryable condition, not an illegal event."""
+
+    def test_incomplete_drain_raises_not_ready_not_illegal(self):
+        from rolloutcore import EvidenceNotReady
+
+        ctrl = drive_to(LifecycleState.DRAINING)
+        exc = assert_state_unchanged(
+            self, ctrl, lambda: ctrl.confirm_drained(good_drain(completed=False))
+        )
+        self.assertIsInstance(exc, EvidenceNotReady)
+        self.assertNotIsInstance(exc, IllegalTransitionError)
+        self.assertIs(ctrl.state, LifecycleState.DRAINING)
 
 
 if __name__ == "__main__":  # pragma: no cover

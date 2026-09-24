@@ -1,26 +1,28 @@
-# RolloutCore lifecycle state machine — design for review
+# RolloutCore lifecycle state machine — design
 
-**Phase 1 deliverable.** Pure Python, no vLLM import, no I/O, no GPU.
-**Status:** awaiting review before the Phase 2 real-vLLM adapter.
+**Phase 1 + Phase 2 (fake-engine cycle).** Pure Python, no vLLM import in the
+controller, no GPU.
 
-Source: `src/rolloutcore/` · Tests: `tests/` (103 tests, 98.9% statement coverage of the package)
-Run: `./scripts/test.sh` (no dependencies — stdlib `unittest`)
+Source: `src/rolloutcore/` · Tests: `tests/` (196 tests)
+Run: `./scripts/test.sh` (no dependencies; also runs ruff + mypy when present)
 
 ---
 
 ## 1. Why the machine looks like this
 
 The controller owns **state**; an adapter owns **effects**. No method in
-`LifecycleController` performs I/O. Instead, each transition takes an *evidence*
-object describing what some external system observed, checks it against that
-state's postcondition, and then either advances, raises, or taints.
+`LifecycleController` performs I/O. Each transition takes an *evidence* object
+describing what some external system observed, checks it against that state's
+postcondition, then advances, raises, or taints.
 
-That split is what makes the two load-bearing claims testable:
+That split is what makes the load-bearing claims testable:
 
 | Claim | How it becomes testable |
 |---|---|
-| "No update begins until drain has **proven** zero active work" | `DrainEvidence` is a required argument to `confirm_drained`; there is no path to `QUIESCED` without one |
-| "Cross-version cache reuse is forbidden" | `InvalidateEvidence` requires three independent booleans; a missing one taints |
+| "No update begins until drain has **proven** zero active work" | `DrainEvidence` is required by `confirm_drained`; there is no path to `QUIESCED` without one |
+| "No cross-version cache reuse" | `InvalidateEvidence` requires three independent booleans; a missing one taints |
+| "Nothing is resumed before it is validated" | The resume is issued only on entry to `RESUMING`, which is reachable only via `confirm_validated` |
+| "A trajectory identifies exact weights" | `UpdateTarget` carries a `WeightIdentity` manifest digest, not just a generation number |
 
 ---
 
@@ -35,12 +37,10 @@ That split is what makes the two load-bearing claims testable:
                                       DRAINING                      │
                                           │                         │
                      confirm_drained(evidence)                      │
-                                          │                         │
                                           ▼                         │
                                       QUIESCED                      │
                                           │                         │
-                        begin_update(target)                        │
-                                          │                         │
+                       begin_update(target)                         │
                                           ▼                         │
                                       UPDATING                      │
                                           │                         │
@@ -51,9 +51,13 @@ That split is what makes the two load-bearing claims testable:
                    confirm_invalidated(evidence)                    │
                                           ▼                         │
                                     VALIDATING                      │
+                                          │  (engine STILL paused)  │
+                     confirm_validated(evidence)                    │
+                                          ▼                         │
+                                     RESUMING                       │
                                           │                         │
-                    confirm_validated(evidence) ────────────────────┘
-                                                            (commit)
+                      confirm_resumed(evidence) ────────────────────┘
+                                                          (commit)
 
    any state except TAINTED ──taint(reason)──► TAINTED   (absorbing)
 ```
@@ -65,15 +69,31 @@ That split is what makes the two load-bearing claims testable:
 | `DRAINING` | Drain requested; active rollouts must reach zero | `POST /pause?mode=wait` in flight |
 | `QUIESCED` | Drain proven: zero active work, engine paused | pause returned; `has_work() == False` |
 | `UPDATING` | Weights in flight over the native data plane | `/start_weight_update` … `/finish_weight_update` |
-| `INVALIDATING` | Dropping every cache holding previous-version content | `/reset_prefix_cache` + `/reset_encoder_cache` + `/reset_mm_cache` |
-| `VALIDATING` | Proving the engine serves the target before publishing | `/resume`, `GET /weight_info`, `GET /is_paused` |
+| `INVALIDATING` | Dropping every cache holding previous-generation content | `/reset_prefix_cache` + `/reset_encoder_cache` + `/reset_mm_cache` |
+| `VALIDATING` | Proving the target **while still paused** | `GET /weight_info`, `GET /is_paused` — **no `/resume`** |
+| `RESUMING` | Resume issued; confirming the engine is actually serving | `POST /resume`, `GET /is_paused` |
 | `TAINTED` | **Terminal in V1.** Never resumed, never rolled back | — |
 
-Seven forward edges, `taint` legal from all eight states (no-op at `TAINTED`).
-The full 8×8 = 64-pair matrix is enumerated in
+Eight forward edges, `taint` legal from all nine states (no-op at `TAINTED`).
+The full 9×9 = 81-pair matrix is enumerated by
 `lifecycle.enumerate_transition_matrix()` and asserted in
-`tests/test_illegal_transitions.py`; 15 pairs are legal (7 edges + 8 taints) and
-49 are illegal.
+`tests/test_illegal_transitions.py`; 17 pairs are legal (8 edges + 9 taints) and
+64 are illegal.
+
+### Why `VALIDATING` runs before `RESUMING` (amendment 1)
+
+Validation answers "are the right weights installed and are the caches clean?".
+Nothing about that answer requires the engine to be serving — and asking it
+while paused means a failure leaves the engine **unable to serve the unverified
+weights at all**, rather than serving them while we discover the problem.
+
+A second reason: a resume is an observable side effect. If it happened inside
+`VALIDATING`, that state would sometimes leave the engine serving and sometimes
+not, depending on where it failed. Making the resume its own transition keeps
+each state's exit condition a pure predicate.
+
+`PAUSED_STATES` (`lifecycle.py`) encodes this and is asserted in tests:
+`VALIDATING` is a paused state; `RESUMING` and `READY` are not.
 
 ---
 
@@ -81,98 +101,112 @@ The full 8×8 = 64-pair matrix is enumerated in
 
 | # | Invariant | Enforced by | Test |
 |---|---|---|---|
-| **I1** | Version atomicity: an update is completely committed or not visible | `_current_version` is written in exactly two places: `initialize` and `confirm_validated` | `TestI1VersionAtomicity` |
-| **I1b** | Versions are monotonic; no downgrade, no no-op update | `begin_update` requires `target > current` | `test_update_target_must_be_strictly_greater`, `test_lower_target_is_rejected` |
-| **I2** | A rollout binds to exactly one committed version, fixed at admission | `RolloutBinding` is frozen; `admit_rollout` only legal in `READY` | `TestI2AdmissionBinding` |
-| **I3** | No cross-version cache reuse | `InvalidateEvidence` requires prefix + encoder + MM; `cache_salt` is version-scoped | `TestI3NoCrossVersionCacheReuse` |
-| **I4** | A trajectory identifies the exact weights that produced it | binding captures `(version, cache_salt, admitted_seq)` | `TestI4ReplayIdentity` |
-| **I5** | No active old-version work when update begins | `confirm_drained` requires `active_rollouts == 0` | `TestI5DrainCorrectness` |
-| **I6** | A failed update never publishes its target | every `confirm_*` failure routes to `_taint`, which clears `pending_version` | `TestI6FailureSafety` |
-| **I7** | RolloutCore is the single lifecycle/weight writer | no public setters; `__slots__`; seeding only over an *unmanaged* label | `TestI7SingleWriter` |
-| **I8** | A version mismatch is a hard failure, never auto-reconciled | `confirm_validated` compares labels for equality and taints | `TestI8NoAutomaticReconciliation` |
-| **I9** | `TAINTED` is terminal in V1 | no edge leaves `TAINTED`; `test_no_edge_leaves_tainted` | `TestI9TaintedIsTerminal` |
-
-### I2 in detail: why DRAINING rejects new rollouts
-
-The old plan (§13) framed this as an explicit policy choice: **queue** or
-**reject/retry**. This design chooses **reject**.
-
-Queueing is unsafe in a way that is easy to miss. With `mode="wait"`, vLLM sets
-`PAUSED_NEW` and blocks the WAITING queue while still stepping RUNNING requests
-(`vllm/v1/core/sched/scheduler.py:868`, `:2668-2669`). A request added during the
-drain therefore sits in the engine's queue and is scheduled *after* `resume` —
-under version **N+1** — while RolloutCore had bound it to N. That is exactly the
-mixed-version response I2 forbids, and the engine cannot detect it, because
-PR #49040 deliberately removed per-request version binding.
-
-Rejecting is the only choice that keeps the binding true. The caller retries
-after `READY`, or holds the request itself.
+| **I1** | Version atomicity: an update is completely committed or not visible | `_current_target` is written in exactly two places: `initialize` and `confirm_resumed` | `TestI1VersionAtomicity` |
+| **I1b** | Versions are monotonic; no downgrade, no no-op update | `begin_update` requires `target.version > current.version` | `test_update_target_must_be_strictly_greater` |
+| **I2** | A rollout binds to exactly one generation *and* identity, fixed at admission | frozen `RolloutBinding`; `admit_rollout` legal only in `READY` | `TestI2AdmissionBinding` |
+| **I3** | No cross-version cache reuse | `InvalidateEvidence` requires prefix + encoder + MM; `cache_salt` is generation-scoped | `TestI3NoCrossVersionCacheReuse` |
+| **I4** | A trajectory identifies the **exact weights** that produced it | `UpdateTarget` carries `WeightIdentity`; the binding copies it | `TestI4ReplayIdentity` |
+| **I5** | No active old-version work when an update begins | `confirm_drained` requires engine proof **and** zero local actives | `TestI5DrainCorrectness` |
+| **I6** | A failed update never publishes its target | every failing `confirm_*` routes to `_taint_with`, which clears `pending_target` | `TestI6FailureSafety` |
+| **I7** | RolloutCore is the single lifecycle/weight writer | no public setters; `__slots__`; bootstrap refuses a managed engine | `TestI7SingleWriter`, `TestI9BootstrapIsSingleOwner` |
+| **I8** | A version mismatch is a hard failure, never auto-reconciled | `confirm_validated` / `confirm_resumed` compare labels for equality and taint | `TestI8NoAutomaticReconciliation` |
+| **I9** | V1 bootstrap is single-owner | `BootstrapEvidence` requires an unmanaged pre-seed label | `TestI9BootstrapIsSingleOwner` |
+| **I10** | `TAINTED` is terminal in V1 | no edge leaves `TAINTED` | `TestI10TaintedIsTerminal` |
 
 ---
 
-## 4. Failure policy: raise vs. taint
+## 4. Failure policy: raise, wait, or taint
 
-This is the one rule a reviewer should push back on if they disagree.
+Three outcomes, and getting the boundaries right is most of the design:
 
-| Kind of failure | Behaviour | Rationale |
+| Kind | Behaviour | Rationale |
 |---|---|---|
-| **Local precondition** — e.g. confirming a drain while rollouts are still active | `InvariantViolation`, **state unchanged** | The engine is healthy; the drain just has not finished. Tainting would destroy a working engine because a caller was early. |
-| **Engine-side evidence** contradicts a postcondition — e.g. `prefix_cache_reset=False`, resume not acknowledged | `EngineTaintedError`, **→ TAINTED** | We can no longer prove the engine's state. Continuing risks serving stale or mixed weights. |
+| **Illegal event** for the current state | `IllegalTransitionError`, state unchanged | Programming error; the state machine says what is allowed |
+| **Local precondition** — e.g. an update target that is not greater than the committed one | `InvariantViolation`, state unchanged | The engine is healthy; the call was wrong |
+| **Observation incomplete** — e.g. the drain is still running | `EvidenceNotReady`, state unchanged, **retryable** | Normal operation. Tainting here would destroy a healthy engine because a caller polled early |
+| **Engine evidence** contradicts a postcondition — e.g. `prefix_cache_reset=False`, resume unacknowledged | `EngineTaintedError`, **→ TAINTED** | We can no longer prove the engine's state |
 
-Consequences worth stating explicitly:
+Consequences:
 
-- `TAINTED` is **absorbing** and **terminal**. V1 does not attempt rollback or
-  resume. The remedy is to restart the engine and construct a new controller.
-- `taint()` is **idempotent** and keeps the *first* reason, because later ones
-  are cascades of the root cause (`test_taint_from_tainted_is_idempotent_and_keeps_first_reason`).
-- `abort_rollout` during a drain is **not** a taint: it is the normal way a
-  straggler is cleared.
+- `TAINTED` is **absorbing** and **terminal**. V1 does not roll back or resume.
+- `taint()` is **idempotent** and keeps the *first* reason, because later ones are
+  cascades of the root cause.
+- `abort_rollout` during a drain is **not** a taint: it is how a straggler is
+  cleared.
+
+### Drain disagreement (amendment 2)
+
+Precisely, in `confirm_drained`:
+
+* `engine_drain_completed is False` → `EvidenceNotReady`. Non-zero local active
+  rollouts are **expected** here; the drain simply has not finished.
+* `engine_drain_completed is True` while local active rollouts remain →
+  **`DrainDisagreementError` (taint)**. The engine asserts quiescence while
+  RolloutCore counts live work; one bookkeeping system is wrong and we cannot
+  tell which.
+* `engine_drain_completed is True` with `engine_active_requests > 0` →
+  taint: the engine's own evidence is self-contradictory.
 
 ### Why no rollback
 
-The old plan (§14) allowed two outcomes for a failed update: *safely restore
-`SERVING(N)`* **or** *enter `FAILED`*. The amendment removes the first option,
-and the source map explains why that is the right call rather than a scope cut:
+The original plan allowed *"safely restore `READY(N)`"* as an alternative to
+failing. vLLM provides no way to verify that:
 
-- `finish_weight_update` invalidates nothing and reports no per-tensor outcome
-  (`vllm/v1/worker/gpu_worker.py:1488-1505`).
-- There is no engine-side commit certificate; `GET /weight_info` returns the
-  last value *set*, not a proof of what is loaded.
+- `finish_weight_update` reports no per-tensor outcome and invalidates nothing
+  (`vllm/v1/worker/gpu_worker.py:1488-1505`);
+- the engine's label is written *before* caches are touched, so it is not a
+  commit marker (demonstrated in `demo.py` scenario 4);
 - RFC #48312's fail-closed storage contract (#48478) is still open.
 
-So "restore `SERVING(N)`" would assert something we cannot verify. Claiming it
-would be worse than admitting the engine is untrusted.
+Asserting "restored to N" would be unverifiable. `TAINTED`-terminal is the
+honest outcome.
+
+### Taint forensics (amendment 5)
+
+`_taint_with` does **not** discard active bindings. It moves them to
+`_orphaned`, each carrying the state it was tainted in, the reason, and a
+sequence number. Whatever was in flight when the engine became untrustworthy is
+exactly the evidence an operator needs to decide what to do with those
+trajectories.
 
 ---
 
-## 5. The bootstrap exception
+## 5. Generation number vs. weight identity (amendment 3)
 
-A fresh `vllm serve` reports `weight_version == "default"`
-(`vllm/v1/engine/core.py:137`). RolloutCore must write `rc-0` before it can
-assert anything, which is otherwise forbidden. `BootstrapEvidence` scopes the
-exception precisely:
+These are deliberately separate types:
 
-- the adapter may set `seeded=True` **only** if the pre-seed label was *not*
-  already RolloutCore-managed (`rc-*`);
-- the post-seed read must confirm `rc-0`.
+| | `WeightVersion` | `WeightIdentity` |
+|---|---|---|
+| Meaning | *when*, for lifecycle ordering | *what*, for provenance |
+| Serialised to the engine | yes, as `rc-<n>` | no — the engine has no field for it |
+| Used for | monotonicity, `cache_salt`, admission ordering | invariant I4, replay, cache-coherence comparison |
+| Equality implies | same update round | same parameter manifest |
 
-Seeding over an existing `rc-N` fails with *"another RolloutCore writer may own
-this engine"* — which is how I7 is defended against a second orchestrator, not
-just against a second thread.
+`UpdateTarget` bundles them, and `begin_update` takes an `UpdateTarget` rather
+than a bare version — so a caller cannot open an update without saying which
+weights it intends to install. `RolloutBinding` copies both.
 
-After `initialize` returns, **any** mismatch is a hard failure. There is no code
-path that writes a version label in response to an observed disagreement.
+**Why generation alone is insufficient for I4**: two controllers can publish
+different weights under the same `rc-N` (a rebuilt controller, a restarted
+engine, a re-run of the same step). "Generation 3" is a lifecycle position, not
+a description of tensors. `TestI4ReplayIdentity` asserts this directly.
+
+**Documented limit.** `WeightIdentity` digests the *manifest* — parameter names,
+dtypes, shapes — not the tensor bytes. That is cheap (computable from
+`ParamMeta` before any transfer, as a trainer-side `WeightSource.metadata()`
+yields) and catches accidental re-publication of the wrong checkpoint. It will
+**not** catch a same-named, same-shaped checkpoint with different values.
+Hashing contents is out of scope for V1 and is stated as a limit rather than
+implied away.
 
 ---
 
 ## 6. What `cache_salt` does and does not do
 
-The amendment is explicit and the source map agrees: **`cache_salt` is
-prefix-cache isolation only.**
-
-It reaches `generate_block_hash_extra_keys`
+**`cache_salt` is prefix-cache isolation only.** It reaches
+`generate_block_hash_extra_keys`
 (`vllm/v1/core/kv_cache_utils.py:632-634`), i.e. the prefix KV block hash at
-block 0. It does **not** isolate:
+block 0. It is *not* a weight identity and *not* universal cache versioning:
 
 | Cache | Key | Covered by `cache_salt`? |
 |---|---|---|
@@ -182,97 +216,128 @@ block 0. It does **not** isolate:
 | LoRA adapter caches | adapter *id* (`vllm/lora/model_manager.py:115-120`) | no |
 
 Hence `InvalidateEvidence` demands all three resets and taints if any is
-missing. A design that relied on `cache_salt` alone would be silently wrong for
-any multimodal or LoRA workload — which is precisely the failure class RFC
-#48312 category 7 tracks.
+missing. A design relying on `cache_salt` alone would be silently wrong for any
+multimodal or LoRA workload — the failure class RFC #48312 category 7 tracks.
 
 ---
 
 ## 7. Control plane vs. data plane
 
-Stated here because it is easy to conflate:
-
 - **HTTP is the lifecycle control plane.** Every state maps to vLLM dev
-  endpoints (`VLLM_SERVER_DEV_MODE=1`): `/pause`, `/resume`,
-  `/start_weight_update`, `/update_weights`, `/finish_weight_update`,
-  `/reset_prefix_cache`, `/reset_encoder_cache`, `/reset_mm_cache`,
-  `/weight_info`, `/is_paused`, `/init_weight_transfer_engine`, `/get_world_size`.
+  endpoints (`VLLM_SERVER_DEV_MODE=1`).
 - **Weights travel over the native trainer-side NCCL data plane**, out of band,
-  driven by `WeightTransferTrainerFactory.trainer_init(...)` and the
-  `send_weights()` loop (`examples/rl/rlhf_async_new_apis.py:152-154`,
-  `:138-150`). The HTTP `POST /update_weights` carries only *metadata*
-  (`names`, `dtype_names`, `shapes`) and blocks while the data plane streams.
+  driven by `WeightTransferTrainerFactory.trainer_init(...)` and
+  `send_weights()`. `POST /update_weights` carries only metadata (`names`,
+  `dtype_names`, `shapes`) and blocks while the workers receive.
 
-RolloutCore never moves a tensor over HTTP.
-
-**Target for the MVP: the `nccl` backend only**, following vLLM's current
+No tensor crosses HTTP. Target backend: **`nccl` only**, following vLLM's
 two-GPU `Qwen/Qwen3-1.7B-Base` → `Qwen/Qwen3-1.7B` example
-(`rlhf_async_new_apis.py:61-62`). One deliberate deviation from that example:
-it uses `pause_generation(mode="keep")`, which this design rejects in favour of
-`mode="wait"` (see §3).
+(`examples/rl/rlhf_async_new_apis.py:61-62`) — with one deliberate deviation:
+that example uses `pause_generation(mode="keep")`, which this design rejects in
+favour of `mode="wait"`.
 
 ---
 
-## 8. Public API
+## 8. The typed adapter port
+
+`CyclePlan.steps` is **human-readable narration only** — for logs, error
+messages and test failure output. Adapters must not parse it. The typed
+interface is `rolloutcore.port.LifecycleAdapter`:
+
+| Method | vLLM operation group |
+|---|---|
+| `bootstrap()` | `/init_weight_transfer_engine`, `/update_weight_version`, `/weight_info`, `/get_world_size` |
+| `begin_drain()` | `POST /pause?mode=wait&clear_cache=true` (non-blocking) |
+| `await_drain()` | polls the above; never blocks indefinitely |
+| `start_weight_update(target)` | `POST /start_weight_update` |
+| `complete_weight_update(target)` | `POST /update_weights` ×N + `POST /finish_weight_update` |
+| `invalidate_caches(target)` | the `/reset_*` triple |
+| `validate_pre_resume(target)` | `GET /weight_info` + `GET /is_paused` — **must not resume** |
+| `resume(target)` | `POST /resume` + `GET /is_paused` |
+
+`CyclePlan` also carries machine-readable `tags` for assertions, but tags are
+never a dispatch mechanism either.
+
+Two implementations ship:
+
+- `adapters/fake.py` — `FakeVLLMAdapter` over an in-memory `FakeVLLMEngine` that
+  reproduces the vLLM behaviours the design depends on (see §10).
+- `adapters/http.py` — `HttpVLLMAdapter`, stdlib `urllib`, injectable
+  `Transport`. Handles the two traps: `/pause` has no server-side timeout, so it
+  runs on a background thread and a stalled attempt triggers `/abort_requests`;
+  and `/reset_prefix_cache` returns HTTP 200 with `{"success": false}` while
+  blocks are held, so a 200 is not success.
+
+---
+
+## 9. Running the cycle
 
 ```python
-from rolloutcore import LifecycleController, LifecycleState, WeightVersion
+from rolloutcore import LifecycleController, LifecycleRunner
+from rolloutcore.adapters import FakeVLLMAdapter, FakeVLLMEngine, manifest_identity
 
+engine = FakeVLLMEngine()
+engine.seed_fresh_with(manifest_identity("A"))
 ctrl = LifecycleController()
-ctrl.initialize(BootstrapEvidence(observed_engine_label="rc-0",
-                                  weight_transfer_initialised=True,
-                                  seeded=True, pre_seed_label="default"))
+runner = LifecycleRunner(ctrl, FakeVLLMAdapter(engine), sleep=lambda _s: None)
 
-b = ctrl.admit_rollout("req-1")      # -> RolloutBinding(version=rc-0, cache_salt="rc-0")
-ctrl.finish_rollout("req-1")
+runner.bootstrap()                                  # -> READY at rc-0
+binding = ctrl.admit_rollout("R1")                  # bound to rc-0 + identity A
+ctrl.finish_rollout("R1")
 
-ctrl.begin_drain()                    # READY -> DRAINING
-ctrl.confirm_drained(DrainEvidence(active_rollouts=0, engine_pause_confirmed=True))
-
-ctrl.begin_update(WeightVersion(1))   # -> CyclePlan(steps=[...]) for the adapter
-ctrl.confirm_updated(UpdateEvidence(...))
-ctrl.confirm_invalidated(InvalidateEvidence(True, True, True))
-ctrl.confirm_validated(ValidateEvidence(...))   # commits rc-1
+result = runner.install_next(manifest_identity("B"))  # -> READY at rc-1
 ```
 
-`CyclePlan.steps` is the adapter's to-do list; it exists so the HTTP calls are
-named in one place and asserted in tests rather than scattered through the
-adapter.
+`python -m rolloutcore.demo` runs this end to end and prints the state journal,
+the engine calls, and three failure scenarios.
 
 ---
 
-## 9. Test suite
+## 10. Fake engine fidelity
 
-| File | Covers |
-|---|---|
-| `test_legal_transitions.py` | all 7 forward edges individually + full cycle + multi-cycle + journal |
-| `test_illegal_transitions.py` | all 64 (state, event) pairs; strong non-mutation assertions; admission matrix across all 8 states |
-| `test_invariants.py` | I1–I9 plus the old plan's §13 mixed-version experiment |
-| `test_evidence.py` | every `failure_reason` branch of all five evidence types |
-| `test_versions.py` | label round-trip, ordering, foreign-label rejection, `cache_salt` schema constraint |
+`FakeVLLMEngine` is not a stub that rubber-stamps: it reproduces the specific
+behaviours the design depends on, each traced to its vLLM source.
 
-103 tests, 98.9% statement coverage. The three unhit lines are deliberate
-defence-in-depth branches (an abstract base raising, and two redundant re-checks
-that `_require_legal` makes unreachable).
+| Behaviour | Why it matters | vLLM anchor |
+|---|---|---|
+| `weight_version` starts as the literal `"default"` and is never auto-incremented | bootstrap must seed `rc-0` | `core.py:137`, `:1043` |
+| `pause(mode="wait")` sets `PAUSED_NEW` **first**, then reports "not complete" while requests are active | a still-running drain is `EvidenceNotReady`, and the engine is already blocking new work | `core.py:2017-2018` |
+| `pause(clear_cache=True)` cleans all three caches | INVALIDATING is a re-assertion, not the only defence | `core.py:877-882` → `:861-875` |
+| `finish_weight_update` writes the version but invalidates **nothing** | the engine label is not a commit marker | `async_llm.py:1284-1288`; `gpu_worker.py:1488-1505` |
+| `finish_weight_update` failure leaves the label unwritten | the label is written only *after* the RPC returns | `async_llm.py:1284-1288` |
+| `reset_prefix_cache` can return `false` while blocks are held | a 200 is not success | `block_pool.py:831-838` |
 
 ---
 
-## 10. Open questions for review
+## 11. Test suite
 
-1. **`InvariantViolation` vs taint for a drain with active rollouts.** I chose
-   *raise and stay in DRAINING*. The alternative reading is that a non-zero
-   count after the engine confirmed a pause is a bookkeeping disagreement and
-   should taint. Current behaviour: local count non-zero → raise; local zero but
-   *evidence* non-zero → taint. Is that split right?
-2. **Reject vs. queue during DRAINING.** Chosen: reject. If the intended
-   integration wants the engine to queue and simply binds late, the admission
-   rule would need to move — but then a trajectory's version is decided by the
-   engine's scheduler, not by RolloutCore.
-3. **`confirm_validated` ordering.** `POST /resume` is modelled as the first
-   action of VALIDATING, so `ValidateEvidence` covers "resumed *and* correct".
-   The alternative is a separate `RESUMING` state. Eight states matches the
-   amendment, so this was folded in rather than added.
-4. **Whether `initialize` should tolerate an already-`rc-0` engine** without
-   seeding. Currently yes (`seeded=False, pre_seed_label=None`), which makes
-   controller restarts against a live engine possible. Worth confirming that
-   restart-adoption is desired in V1, given I7.
+| File | Tests | Covers |
+|---|---|---|
+| `test_legal_transitions.py` | 18 | all 8 forward edges individually, full cycle, multi-cycle, journal, resume ordering |
+| `test_illegal_transitions.py` | 14 | all 81 (state, event) pairs; strong non-mutation; admission matrix across 9 states |
+| `test_invariants.py` | 52 | I1–I10, taint forensics, the plan's §13 mixed-version experiment |
+| `test_evidence.py` | 32 | every `failure_reason` branch of all six evidence types |
+| `test_versions.py` | 36 | label round-trip, ordering, `WeightIdentity` canonicity, `cache_salt` constraint |
+| `test_cycle.py` | 18 | **Phase 2**: full cycle over the fake engine, pause ordering, drain polling, 5 failure paths |
+| `test_http_adapter.py` | 26 | call sequences, query params, both traps, port conformance |
+
+196 tests. `ruff check`, `ruff format --check` and `mypy --strict` all pass on
+the package; CI runs them on Python 3.11/3.12/3.13.
+
+---
+
+## 12. Open questions
+
+1. **`invoke`-style ergonomics for `EvidenceNotReady`.** `LifecycleRunner` polls
+   and retries on `EvidenceNotReady`; other callers must handle it too. Should
+   the controller expose a `wait_for_drain(adapter)` helper, or is the runner the
+   only sanctioned driver?
+2. **Identity for the bootstrap weights.** `BootstrapEvidence.weight_identity` is
+   supplied by the adapter, because the engine cannot report one. For a real
+   `vllm serve`, where should it come from — the trainer's manifest, a
+   checkpoint hash, or the model loader's `ParamMeta`?
+3. **Content hashing.** Manifest digests cannot detect a same-shaped checkpoint
+   with different values. Is per-tensor content hashing worth the cost in V2?
+4. **`RESUMING` retry policy.** A failed `/resume` currently taints. The engine
+   may be resumable by a plain retry; should `RESUMING` allow a bounded retry
+   before tainting, given the engine is paused (and therefore safe) throughout?

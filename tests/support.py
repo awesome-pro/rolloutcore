@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared fixtures for the Phase 1 tests.
+"""Shared fixtures for the tests.
 
 The important helper is :func:`drive_to`, which produces a controller sitting in
-any one of the eight states using only *valid* evidence. Every test that needs
-"a controller in state X" goes through it, so the states are constructed exactly
-one way and the illegal-transition matrix cannot accidentally test an
+any one of the nine states using only *valid* evidence. Every test that needs "a
+controller in state X" goes through it, so the states are constructed exactly one
+way and the illegal-transition matrix cannot accidentally test an
 invalidly-constructed controller.
 """
 
@@ -17,69 +17,112 @@ from rolloutcore import (
     InvalidateEvidence,
     LifecycleController,
     LifecycleState,
+    ResumeEvidence,
     UpdateEvidence,
+    UpdateTarget,
     ValidateEvidence,
+    WeightIdentity,
     WeightVersion,
 )
+from rolloutcore.adapters import manifest_identity
 
-#: A bootstrap that a correct Phase 2 adapter would produce against a fresh
-#: ``vllm serve``: the engine reports the unmanaged literal ``"default"``, the
-#: adapter seeds ``rc-0``, and the post-seed read confirms it.
+#: Two distinguishable weight sets, modelling the plan's Model A / Model B.
+IDENTITY_V0: WeightIdentity = manifest_identity("v0")
+IDENTITY_V1: WeightIdentity = manifest_identity("v1")
+IDENTITY_V2: WeightIdentity = manifest_identity("v2")
+
+#: A bootstrap a correct adapter produces against a fresh ``vllm serve``: the
+#: engine reports the unmanaged literal ``"default"``, the adapter seeds
+#: ``rc-0``, and the post-seed read confirms it.
 GOOD_BOOTSTRAP = BootstrapEvidence(
     observed_engine_label="rc-0",
     weight_transfer_initialised=True,
-    seeded=True,
     pre_seed_label="default",
-    world_size=2,
+    weight_identity=IDENTITY_V0,
     backend="nccl",
-)
-
-GOOD_DRAIN = DrainEvidence(active_rollouts=0, engine_pause_confirmed=True)
-GOOD_INVALIDATE = InvalidateEvidence(
-    prefix_cache_reset=True, encoder_cache_reset=True, mm_cache_reset=True
+    world_size=2,
 )
 
 
-def good_update(target: WeightVersion, **overrides) -> UpdateEvidence:
-    kwargs = dict(
-        target_version=target,
+def target(version: int, identity: WeightIdentity | None = None) -> UpdateTarget:
+    """An update target for a generation, with a distinct identity by default."""
+    return UpdateTarget(
+        version=WeightVersion(version),
+        identity=identity or manifest_identity(f"v{version}"),
+    )
+
+
+#: The identity ``drive_to`` installs when it advances to generation 1.
+TARGET_V1 = target(1)
+
+
+def good_drain(completed: bool = True, engine_active: int | None = None) -> DrainEvidence:
+    return DrainEvidence(
+        engine_drain_completed=completed,
+        engine_active_requests=engine_active,
+    )
+
+
+def good_update(t: UpdateTarget, **overrides: object) -> UpdateEvidence:
+    kwargs: dict = dict(
+        target=t,
         weights_loaded=True,
         finish_acknowledged=True,
         chunks_transferred=12,
         data_plane_complete=True,
+        observed_identity=t.identity,
     )
     kwargs.update(overrides)
     return UpdateEvidence(**kwargs)
 
 
-def good_validate(target: WeightVersion, **overrides) -> ValidateEvidence:
-    kwargs = dict(
-        target_version=target,
-        observed_engine_label=target.label,
-        resume_acknowledged=True,
-        is_paused=False,
+def good_invalidate(**overrides: object) -> InvalidateEvidence:
+    kwargs: dict = dict(prefix_cache_reset=True, encoder_cache_reset=True, mm_cache_reset=True)
+    kwargs.update(overrides)
+    return InvalidateEvidence(**kwargs)
+
+
+def good_validate(t: UpdateTarget, **overrides: object) -> ValidateEvidence:
+    """Pre-resume evidence. ``is_paused`` is **True** -- we have not resumed yet."""
+    kwargs: dict = dict(
+        target=t,
+        observed_engine_label=t.label,
+        is_paused=True,
+        caches_still_clean=True,
     )
     kwargs.update(overrides)
     return ValidateEvidence(**kwargs)
 
 
-def bootstrapped(**overrides) -> LifecycleController:
-    """A controller in READY at version 0."""
+def good_resume(t: UpdateTarget, **overrides: object) -> ResumeEvidence:
+    kwargs: dict = dict(
+        target=t,
+        resume_acknowledged=True,
+        is_paused=False,
+        observed_engine_label=t.label,
+    )
+    kwargs.update(overrides)
+    return ResumeEvidence(**kwargs)
+
+
+def bootstrapped(**overrides: object) -> LifecycleController:
+    """A controller in READY at generation 0."""
     ctrl = LifecycleController()
     ctrl.initialize(overrides.pop("evidence", GOOD_BOOTSTRAP))
     return ctrl
 
 
 def drive_to(state: LifecycleState) -> LifecycleController:
-    """Return a controller in ``state`` at the committed version noted below.
+    """Return a controller in ``state``.
 
-    UNINITIALIZED -- no version
+    UNINITIALIZED -- no target
     READY         -- v0 committed
     DRAINING      -- v0 committed, 0 active rollouts
     QUIESCED      -- v0 committed
     UPDATING      -- v0 committed, v1 pending
     INVALIDATING  -- v0 committed, v1 pending
-    VALIDATING    -- v0 committed, v1 pending
+    VALIDATING    -- v0 committed, v1 pending, engine still paused
+    RESUMING      -- v0 committed, v1 pending, resume issued
     TAINTED       -- v0 committed, tainted from READY
     """
     ctrl = LifecycleController()
@@ -98,24 +141,48 @@ def drive_to(state: LifecycleState) -> LifecycleController:
     if state is LifecycleState.DRAINING:
         return ctrl
 
-    ctrl.confirm_drained(GOOD_DRAIN)
+    ctrl.confirm_drained(good_drain())
     if state is LifecycleState.QUIESCED:
         return ctrl
 
-    target = WeightVersion(1)
-    ctrl.begin_update(target)
+    t = TARGET_V1
+    ctrl.begin_update(t)
     if state is LifecycleState.UPDATING:
         return ctrl
 
-    ctrl.confirm_updated(good_update(target))
+    ctrl.confirm_updated(good_update(t))
     if state is LifecycleState.INVALIDATING:
         return ctrl
 
-    ctrl.confirm_invalidated(GOOD_INVALIDATE)
+    ctrl.confirm_invalidated(good_invalidate())
     if state is LifecycleState.VALIDATING:
         return ctrl
 
+    ctrl.confirm_validated(good_validate(t))
+    if state is LifecycleState.RESUMING:
+        return ctrl
+
     raise AssertionError(f"drive_to does not support {state}")  # pragma: no cover
+
+
+def run_full_cycle(ctrl: LifecycleController, t: UpdateTarget) -> None:
+    """Drive one complete READY -> ... -> READY cycle on ``ctrl``."""
+    from rolloutcore import Event as _E  # noqa: F401
+
+    ctrl.begin_drain()
+    ctrl.confirm_drained(good_drain())
+    ctrl.begin_update(t)
+    ctrl.confirm_updated(good_update(t))
+    ctrl.confirm_invalidated(good_invalidate())
+    ctrl.confirm_validated(good_validate(t))
+    ctrl.confirm_resumed(good_resume(t))
+
+
+def advance_to_version(ctrl: LifecycleController, target_version: WeightVersion) -> None:
+    """Run whole cycles until ``target_version`` is committed."""
+    while ctrl.current_version is None or ctrl.current_version < target_version:
+        assert ctrl.current_version is not None
+        run_full_cycle(ctrl, target(ctrl.current_version.next().value))
 
 
 def invoke(ctrl: LifecycleController, event: Event) -> None:
@@ -129,58 +196,47 @@ def invoke(ctrl: LifecycleController, event: Event) -> None:
     elif event is Event.BEGIN_DRAIN:
         ctrl.begin_drain()
     elif event is Event.CONFIRM_DRAINED:
-        ctrl.confirm_drained(GOOD_DRAIN)
+        ctrl.confirm_drained(good_drain())
     elif event is Event.BEGIN_UPDATE:
         current = ctrl.current_version or WeightVersion(0)
-        ctrl.begin_update(current.next())
+        ctrl.begin_update(target(current.next().value))
     elif event is Event.CONFIRM_UPDATED:
-        target = ctrl.pending_version or WeightVersion(1)
-        ctrl.confirm_updated(good_update(target))
+        ctrl.confirm_updated(good_update(ctrl.pending_target or TARGET_V1))
     elif event is Event.CONFIRM_INVALIDATED:
-        ctrl.confirm_invalidated(GOOD_INVALIDATE)
+        ctrl.confirm_invalidated(good_invalidate())
     elif event is Event.CONFIRM_VALIDATED:
-        target = ctrl.pending_version or WeightVersion(1)
-        ctrl.confirm_validated(good_validate(target))
+        ctrl.confirm_validated(good_validate(ctrl.pending_target or TARGET_V1))
+    elif event is Event.CONFIRM_RESUMED:
+        ctrl.confirm_resumed(good_resume(ctrl.pending_target or TARGET_V1))
     elif event is Event.TAINT:
         ctrl.taint("matrix probe")
     else:  # pragma: no cover
         raise AssertionError(f"unhandled event {event}")
 
 
-def advance_to_version(ctrl: LifecycleController, target: WeightVersion) -> None:
-    """Run whole cycles until ``target`` is committed. Controller ends in READY."""
-    while ctrl.current_version is None or ctrl.current_version < target:
-        assert ctrl.current_version is not None
-        nxt = ctrl.current_version.next()
-        ctrl.begin_drain()
-        ctrl.confirm_drained(GOOD_DRAIN)
-        ctrl.begin_update(nxt)
-        ctrl.confirm_updated(good_update(nxt))
-        ctrl.confirm_invalidated(GOOD_INVALIDATE)
-        ctrl.confirm_validated(good_validate(nxt))
-
-
-def assert_state_unchanged(test, ctrl: LifecycleController, fn) -> None:
+def assert_state_unchanged(test, ctrl: LifecycleController, fn):
     """Assert ``fn`` raises, and that the controller is untouched by it.
 
-    Checks the *observable* identity of the controller -- state, versions,
-    active rollouts and journal length -- rather than just the state, so a
+    Checks the *observable* identity of the controller -- state, targets, active
+    rollouts, orphan count and journal length -- rather than just the state, so a
     mutation performed before the legality check is caught too.
     """
     before = (
         ctrl.state,
-        ctrl.current_version,
-        ctrl.pending_version,
+        ctrl.current_target,
+        ctrl.pending_target,
         ctrl.active_rollouts,
+        len(ctrl.orphaned_rollouts),
         len(ctrl.journal),
     )
     with test.assertRaises(Exception) as ctx:
         fn()
     after = (
         ctrl.state,
-        ctrl.current_version,
-        ctrl.pending_version,
+        ctrl.current_target,
+        ctrl.pending_target,
         ctrl.active_rollouts,
+        len(ctrl.orphaned_rollouts),
         len(ctrl.journal),
     )
     test.assertEqual(before, after, "controller mutated by a rejected event")

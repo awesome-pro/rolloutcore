@@ -1,27 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Every transition is a typed call that either happens or raises.
+"""Evidence: what an adapter observed, checked against a state's postcondition.
 
-The controller never performs I/O. It receives *evidence* describing what some
-adapter observed, checks the evidence against the state's postconditions, and
-either advances or taints. Keeping evidence as explicit objects (rather than
-booleans threaded through the controller) is what makes the "proven zero active
-work" and "cache invalidation actually happened" claims testable.
+The controller never performs I/O. It receives *evidence*, checks it, and either
+advances, raises (recoverable), or taints (terminal). Keeping evidence as
+explicit frozen objects rather than booleans threaded through the controller is
+what makes claims like "the drain was proven" and "the encoder cache was
+actually dropped" testable rather than aspirational.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
-from .versions import WeightVersion
+from .versions import UpdateTarget, WeightIdentity, WeightVersion
 
 
 class Evidence:
-    """Base class. Subclasses report what an external system observed.
+    """Base class.
 
     ``failure_reason()`` returns ``None`` when the evidence satisfies the
     postcondition, or a human-readable string when it does not. A non-``None``
-    reason always taints the engine: see ``docs/state-machine.md`` for why local
-    precondition errors raise instead.
+    reason always taints; ``EvidenceNotReady`` is raised instead when the
+    observation is merely incomplete (see ``lifecycle.py`` for the split).
     """
 
     def failure_reason(self) -> str | None:  # pragma: no cover - overridden
@@ -30,91 +31,99 @@ class Evidence:
 
 @dataclass(frozen=True, slots=True)
 class BootstrapEvidence(Evidence):
-    """Result of bringing an engine under RolloutCore control.
+    """Result of bringing a fresh engine under RolloutCore control.
 
     Phase 2 adapter produces this from, in order:
-    ``POST /init_weight_transfer_engine`` -> (optionally seed the label) ->
-    ``POST /update_weight_version`` -> ``GET /weight_info`` -> ``GET /get_world_size``.
-    All are vLLM dev endpoints (``vllm/entrypoints/serve/dev/rlhf/api_router.py:156``,
-    ``:213``, ``:222``, ``:228``) and all require ``VLLM_SERVER_DEV_MODE=1``.
+    ``POST /init_weight_transfer_engine`` -> read the pre-seed label ->
+    ``POST /update_weight_version {"new_version": "rc-0"}`` -> ``GET /weight_info``
+    -> ``GET /get_world_size``. All are vLLM dev endpoints
+    (``vllm/entrypoints/serve/dev/rlhf/api_router.py:156``, ``:213``, ``:222``,
+    ``:228``) and all require ``VLLM_SERVER_DEV_MODE=1``.
 
-    **Bootstrap is the one sanctioned exception to "never write the version
-    yourself".** A fresh engine reports the literal ``"default"``
-    (``vllm/v1/engine/core.py:137``), so without seeding, no engine could ever
-    enter service. The exception is narrowly scoped by ``seeded``/
-    ``pre_seed_label``: the adapter may overwrite the label **only** when the
-    pre-seed label is not already RolloutCore-managed. Clobbering an ``rc-*``
-    label would mean two writers, which breaks "RolloutCore is the single
-    lifecycle/weight writer".
+    **V1 bootstrap is single-owner.** A new controller may only claim an engine
+    whose label is *unmanaged* (``"default"`` on a fresh server). Adopting an
+    engine already carrying an ``rc-*`` label would mean two controllers can
+    write lifecycle state for one engine, which breaks "RolloutCore is the
+    single lifecycle/weight writer". Recovering such an engine requires an
+    explicit lease/recovery protocol that V1 does not implement, so it is
+    refused rather than guessed at.
     """
 
     #: Raw ``weight_version`` string reported by ``GET /weight_info`` *after*
-    #: bootstrap has finished. Must be ``"rc-0"``.
+    #: bootstrap. Must be ``"rc-0"``.
     observed_engine_label: str
     #: Did ``POST /init_weight_transfer_engine`` return success?
     weight_transfer_initialised: bool
-    #: Did the adapter have to write the initial label itself?
-    seeded: bool = False
-    #: What ``GET /weight_info`` reported *before* seeding, if ``seeded``.
-    pre_seed_label: str | None = None
-    #: ``world_size_across_dp`` from ``GET /get_world_size``; None if unknown.
-    world_size: int | None = None
+    #: What ``GET /weight_info`` reported *before* seeding. Required, and must be
+    #: unmanaged -- this is the single-owner check.
+    pre_seed_label: str | None
+    #: Identity of the weights the engine currently holds.
+    weight_identity: WeightIdentity
     #: Backend the engine was launched with, e.g. ``"nccl"``.
     backend: str = "nccl"
+    #: ``world_size_across_dp`` from ``GET /get_world_size``; None if unknown.
+    world_size: int | None = None
 
     def failure_reason(self) -> str | None:
         if not self.weight_transfer_initialised:
             return "weight transfer engine was not initialised"
 
-        if not self.seeded:
-            if self.pre_seed_label is not None:
-                return "pre_seed_label was supplied but seeded is False"
-            return None
-
         if self.pre_seed_label is None:
-            return "adapter seeded the version label but did not report the pre-seed label"
+            return (
+                "bootstrap must report the pre-seed label; V1 is single-owner and "
+                "does not adopt an engine it did not seed"
+            )
 
         try:
             WeightVersion.parse_label(self.pre_seed_label)
         except ValueError:
-            # Expected: the pre-seed label was unmanaged ("default"), so
-            # overwriting it is legitimate bootstrap, not reconciliation.
+            # Expected: the pre-seed label was unmanaged, so overwriting it is
+            # legitimate bootstrap rather than reconciliation.
             return None
         return (
-            f"refusing to seed over pre-existing managed label {self.pre_seed_label!r}; "
-            "another RolloutCore writer may own this engine"
+            f"refusing to claim engine already labelled {self.pre_seed_label!r}: "
+            "another RolloutCore controller may own it (a lease/recovery protocol "
+            "is required and V1 does not implement one)"
         )
 
 
 @dataclass(frozen=True, slots=True)
 class DrainEvidence(Evidence):
-    """Proof that the engine has no active work and is quiesced.
+    """The engine's response to ``POST /pause?mode=wait&clear_cache=true``.
 
-    Phase 2 adapter produces this from ``POST /pause?mode=wait&clear_cache=true``
-    (``dev/rlhf/api_router.py:29``). That call returns only once the
-    ``EngineCoreProc.pause_scheduler`` future resolves, which happens when
+    Two distinct outcomes, deliberately separated:
+
+    * ``engine_drain_completed is False`` -- the drain is still in flight. Not a
+      failure, just early: the controller raises ``EvidenceNotReady`` and stays
+      in DRAINING. Non-zero local active rollouts are entirely normal here.
+    * ``engine_drain_completed is True`` -- the engine asserts it is quiesced, so
+      the local active-rollout count *must* be zero. Any disagreement means one
+      of the two bookkeeping systems is wrong, and we can no longer tell which,
+      so the controller **taints** rather than retrying.
+
+    Reference for what "completed" means on the engine side: the
+    ``EngineCoreProc.pause_scheduler`` future resolves only when
     ``Scheduler.get_num_unfinished_requests()`` reports zero
-    (``vllm/v1/core/scheduler.py:2668-2669`` feeding ``has_work()`` at
-    ``vllm/v1/engine/core.py:1457-1463``). That is the drain proof.
-
-    ``engine_pause_confirmed`` must be True. If the pause RPC failed or timed
-    out, the engine's state is unknown and the controller taints.
+    (``vllm/v1/core/sched/scheduler.py:2668-2669`` feeding ``has_work()`` at
+    ``vllm/v1/engine/core.py:1457-1463``).
     """
 
-    #: Active rollouts as RolloutCore counts them. Must be zero.
-    active_rollouts: int
     #: Did the drain call actually return successfully?
-    engine_pause_confirmed: bool
+    engine_drain_completed: bool
+    #: Optional engine-side active-request count, if the adapter can read one.
+    #: A non-zero value alongside ``engine_drain_completed`` is self-contradictory.
+    engine_active_requests: int | None = None
     #: Optional human note, e.g. "aborted 3 stragglers then re-paused".
     note: str = ""
 
     def failure_reason(self) -> str | None:
-        if not self.engine_pause_confirmed:
-            return "engine did not confirm a completed drain (pause not confirmed)"
-        if self.active_rollouts != 0:
-            # Unreachable via the public API: the controller checks its own
-            # counter first and raises. Kept as defence in depth.
-            return f"drain evidence claims zero work but {self.active_rollouts} rollouts are active"
+        if not self.engine_drain_completed:
+            return "engine has not confirmed a completed drain"
+        if self.engine_active_requests not in (None, 0):
+            return (
+                f"engine reports drain complete but also {self.engine_active_requests} "
+                "active request(s); engine evidence is self-contradictory"
+            )
         return None
 
 
@@ -133,8 +142,8 @@ class UpdateEvidence(Evidence):
     Hence the separate INVALIDATING state.
     """
 
-    #: The version this update was supposed to install.
-    target_version: WeightVersion
+    #: What this update was supposed to install: generation *and* identity.
+    target: UpdateTarget
     #: Did every chunk of ``POST /update_weights`` report success?
     weights_loaded: bool
     #: Did ``POST /finish_weight_update`` return success?
@@ -143,6 +152,9 @@ class UpdateEvidence(Evidence):
     chunks_transferred: int | None = None
     #: Did the trainer-side NCCL/IPC data plane report completion?
     data_plane_complete: bool = True
+    #: Identity the adapter independently observed on the engine side, if any.
+    #: A mismatch against ``target.identity`` means the wrong checkpoint landed.
+    observed_identity: WeightIdentity | None = None
 
     def failure_reason(self) -> str | None:
         if not self.weights_loaded:
@@ -151,12 +163,17 @@ class UpdateEvidence(Evidence):
             return "trainer-side weight data plane did not report completion"
         if not self.finish_acknowledged:
             return "finish_weight_update was not acknowledged by the engine"
+        if self.observed_identity is not None and self.observed_identity != self.target.identity:
+            return (
+                f"engine holds weight identity {self.observed_identity.short} but "
+                f"{self.target.identity.short} was loaded"
+            )
         return None
 
 
 @dataclass(frozen=True, slots=True)
 class InvalidateEvidence(Evidence):
-    """Proof that every cache holding version-N content has been dropped.
+    """Proof that every cache holding previous-generation content is dropped.
 
     All three flags are required. This is deliberately stricter than the
     ``clear_cache=true`` pause flag, because:
@@ -202,37 +219,83 @@ class InvalidateEvidence(Evidence):
 
 @dataclass(frozen=True, slots=True)
 class ValidateEvidence(Evidence):
-    """Proof that the engine is serving exactly the target version.
+    """Pre-resume correctness evidence. **The engine is still paused here.**
 
-    Phase 2 adapter produces this from ``POST /resume`` followed by
-    ``GET /weight_info`` (``dev/rlhf/api_router.py:76``, ``:222``) and
-    ``GET /is_paused`` (``:139``).
+    Phase 2 adapter produces this from ``GET /weight_info`` and
+    ``GET /is_paused`` (``dev/rlhf/api_router.py:222``, ``:139``) *without*
+    calling ``/resume``. Resume happens only in RESUMING, after this passes.
+
+    Two reasons for the ordering:
+
+    1. Fail-closed. If validation fails, the engine has never been resumed, so
+       it cannot serve a rollout under weights we could not verify.
+    2. A resume is itself an observable act. Doing it inside VALIDATING would
+       mean VALIDATING sometimes leaves the engine serving and sometimes not,
+       depending on where it failed.
 
     ``observed_engine_label`` is compared for **exact equality** with the
     target's label. A mismatch is a hard failure that taints: RolloutCore never
     "fixes" it by calling ``POST /update_weight_version``
     (``dev/rlhf/api_router.py:213``). Silently reconciling would mean publishing
     a version whose weights we cannot prove are installed -- the exact
-    ``SERVING with partially updated weights`` state the old plan forbids.
+    ``READY with partially updated weights`` state the plan forbids.
     """
 
-    target_version: WeightVersion
+    target: UpdateTarget
     #: Raw ``weight_version`` string reported by ``GET /weight_info``.
     observed_engine_label: str
+    #: ``GET /is_paused``. Must be **True**: we have not resumed yet, so a
+    #: not-paused engine means something else resumed it behind our back.
+    is_paused: bool
+    #: Did ``POST /reset_prefix_cache`` (or an equivalent) leave the caches clean
+    #: *and still clean* at validation time? Adapter-supplied, optional.
+    caches_still_clean: bool = True
+
+    def failure_reason(self) -> str | None:
+        if self.observed_engine_label != self.target.label:
+            return (
+                f"engine reports weight_version {self.observed_engine_label!r} but "
+                f"{self.target.label!r} was expected; refusing to reconcile"
+            )
+        if not self.is_paused:
+            return (
+                "engine is not paused during validation; it was resumed outside "
+                "RolloutCore's control"
+            )
+        if not self.caches_still_clean:
+            return "caches were repopulated between invalidation and validation"
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeEvidence(Evidence):
+    """Result of issuing the resume, after validation has already passed.
+
+    Phase 2 adapter produces this from ``POST /resume`` followed by
+    ``GET /is_paused`` (``dev/rlhf/api_router.py:76``, ``:139``).
+    """
+
+    target: UpdateTarget
     #: Did ``POST /resume`` return success?
     resume_acknowledged: bool
-    #: ``GET /is_paused`` -- must be False.
+    #: ``GET /is_paused`` after the resume. Must be False.
     is_paused: bool
+    #: Re-read of ``GET /weight_info`` after resume, if the adapter re-checks.
+    #: A post-resume version drift taints.
+    observed_engine_label: str | None = None
 
     def failure_reason(self) -> str | None:
         if not self.resume_acknowledged:
             return "resume was not acknowledged by the engine"
         if self.is_paused:
             return "engine still reports paused after resume"
-        if self.observed_engine_label != self.target_version.label:
+        if (
+            self.observed_engine_label is not None
+            and self.observed_engine_label != self.target.label
+        ):
             return (
-                f"engine reports weight_version {self.observed_engine_label!r} but "
-                f"{self.target_version.label!r} was expected; refusing to reconcile"
+                f"engine reports weight_version {self.observed_engine_label!r} after "
+                f"resume but {self.target.label!r} was committed"
             )
         return None
 
@@ -241,8 +304,8 @@ class ValidateEvidence(Evidence):
 class TransitionRecord:
     """One entry in the lifecycle journal.
 
-    Exists so the Phase 4 metrics work (drain latency, update latency, total
-    downtime) has a substrate, and so tests can assert on the exact path taken.
+    Exists so the benchmark work (drain latency, update latency, total downtime)
+    has a substrate, and so tests can assert on the exact path taken.
     """
 
     seq: int
@@ -250,16 +313,50 @@ class TransitionRecord:
     to_state: str
     event: str
     version: WeightVersion | None = None
+    identity: WeightIdentity | None = None
     detail: str = ""
 
 
 @dataclass(frozen=True, slots=True)
-class CyclePlan:
-    """The intents emitted when a cycle advances.
+class OrphanedRollout:
+    """A rollout binding retained for forensics after the engine was tainted.
 
-    Returned to the adapter so it knows exactly what I/O to perform next
-    without the controller knowing anything about HTTP.
+    Amendment 5: tainting must not silently discard active bindings. Whatever
+    was in flight when the engine became untrustworthy is exactly the evidence
+    an operator needs to decide what to do with those trajectories, so it is
+    preserved (and marked unresolved) rather than cleared.
     """
 
-    target_version: WeightVersion
+    binding: Any  # RolloutBinding; Any avoids a circular import
+    orphaned_in_state: str
+    reason: str
+    seq: int
+
+    @property
+    def request_id(self) -> str:
+        return str(self.binding.request_id)
+
+    @property
+    def version(self) -> WeightVersion:
+        return self.binding.version  # type: ignore[no-any-return]
+
+    @property
+    def weight_identity(self) -> WeightIdentity:
+        return self.binding.weight_identity  # type: ignore[no-any-return]
+
+
+@dataclass(frozen=True, slots=True)
+class CyclePlan:
+    """Narration of what a transition expects the adapter to do next.
+
+    ``steps`` is **human-readable documentation only**. It is written for logs,
+    error messages and test failure output. Phase 2 adapters must call typed
+    adapter methods (see ``rolloutcore.port.LifecycleAdapter``); parsing these
+    strings would make the HTTP surface part of the controller's contract, which
+    is precisely what the controller/adapter split exists to prevent.
+    """
+
+    target: UpdateTarget
     steps: tuple[str, ...] = field(default_factory=tuple)
+    #: Machine-readable tags for logging/assertions. Never a dispatch mechanism.
+    tags: tuple[str, ...] = field(default_factory=tuple)

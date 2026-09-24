@@ -35,6 +35,24 @@ class InvariantViolation(RolloutCoreError):
         super().__init__(f"[{invariant}] {detail}")
 
 
+class EvidenceNotReady(InvariantViolation):
+    """The observation is simply incomplete — the caller was early.
+
+    Distinct from both ``InvariantViolation`` (which usually means RolloutCore's
+    own bookkeeping disagrees with itself) and ``EngineTaintedError`` (which
+    means the engine can no longer be trusted).
+
+    The canonical case is confirming a drain while ``/pause?mode=wait`` is still
+    in flight. That is normal operation: the caller should wait and re-confirm,
+    not abandon the engine. Once the engine *does* report a completed drain,
+    however, an outstanding local count is a genuine disagreement and taints --
+    see ``docs/state-machine.md`` section 4.
+    """
+
+    def __init__(self, invariant: str, detail: str) -> None:
+        super().__init__(invariant, f"not ready: {detail}")
+
+
 class IllegalTransitionError(InvariantViolation):
     """The requested event does not exist from the current state."""
 
@@ -100,4 +118,23 @@ class VersionMismatchError(EngineTaintedError):
             state,
             f"expected engine weight_version {expected.label!r}, observed {observed!r}; "
             "automatic reconciliation is disabled",
+        )
+
+
+class DrainDisagreementError(EngineTaintedError):
+    """The engine reported a completed drain while rollouts were still active.
+
+    Amendment 2: this is a disagreement between two bookkeeping systems, not a
+    "wait a bit longer" situation. One of them is wrong and we cannot tell
+    which, so the engine is tainted rather than retried.
+    """
+
+    def __init__(self, state: str, active_rollouts: int, request_ids: list[str]) -> None:
+        self.active_rollouts = active_rollouts
+        self.request_ids = request_ids
+        super().__init__(
+            state,
+            f"engine reported a completed drain but RolloutCore still counts "
+            f"{active_rollouts} active rollout(s) ({', '.join(request_ids)}); "
+            "engine and controller bookkeeping disagree",
         )

@@ -1,17 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Version identity tests.
+"""Identity tests.
 
-The engine treats ``weight_version`` as an opaque string
-(``vllm/v1/engine/core.py:136-137``), so all type safety has to live here. These
-tests pin the label format, the ordering, and the constraint that ``cache_salt``
-must satisfy to be accepted by vLLM's OpenAI schema.
+Two distinct concepts are covered here, and keeping them apart is the point of
+amendment 3:
+
+* ``WeightVersion`` -- a *generation number* for lifecycle ordering, serialised
+  into the engine's opaque ``weight_version`` string.
+* ``WeightIdentity`` -- an immutable *content digest* over the parameter
+  manifest, which is what invariant I4 needs in order to claim exact weights.
+
+Tests for both the label format/ordering and the digest's canonicity live here,
+plus the constraint ``cache_salt`` must satisfy to be accepted by vLLM's OpenAI
+schema.
 """
 
 from __future__ import annotations
 
 import unittest
+from dataclasses import FrozenInstanceError
 
-from rolloutcore import ENGINE_LABEL_PREFIX, INITIAL_VERSION, VersionError, WeightVersion
+from rolloutcore import (
+    DIGEST_PREFIX,
+    ENGINE_LABEL_PREFIX,
+    INITIAL_VERSION,
+    ParamSpec,
+    UpdateTarget,
+    VersionError,
+    WeightIdentity,
+    WeightIdentityError,
+    WeightVersion,
+)
 
 #: Mirrors ``validate_cache_salt`` in
 #: ``vllm/entrypoints/generate/base/protocol.py:33-49``: a non-empty string of at
@@ -19,8 +37,13 @@ from rolloutcore import ENGINE_LABEL_PREFIX, INITIAL_VERSION, VersionError, Weig
 CACHE_SALT_MAX_LEN = 128
 CACHE_SALT_FORBIDDEN = ("@", "/", "\\", "\x00")
 
+PAIRS = [
+    ("model.embed_tokens.weight", "bfloat16", (151936, 2048)),
+    ("model.layers.0.self_attn.q_proj.weight", "bfloat16", (2048, 2048)),
+]
 
-class TestConstruction(unittest.TestCase):
+
+class TestWeightVersionConstruction(unittest.TestCase):
     def test_initial_version_is_zero(self):
         self.assertEqual(INITIAL_VERSION, 0)
         self.assertEqual(WeightVersion(INITIAL_VERSION).label, "rc-0")
@@ -31,9 +54,8 @@ class TestConstruction(unittest.TestCase):
 
     def test_non_int_is_rejected(self):
         for bad in ("1", 1.0, None):
-            with self.subTest(bad=bad):
-                with self.assertRaises(VersionError):
-                    WeightVersion(bad)  # type: ignore[arg-type]
+            with self.subTest(bad=bad), self.assertRaises(VersionError):
+                WeightVersion(bad)  # type: ignore[arg-type]
 
     def test_bool_is_rejected(self):
         """``True`` is an ``int`` in Python; it must not be a version."""
@@ -45,7 +67,9 @@ class TestLabelRoundTrip(unittest.TestCase):
     def test_round_trip(self):
         for n in (0, 1, 7, 42, 10_000):
             with self.subTest(n=n):
-                self.assertEqual(WeightVersion.parse_label(WeightVersion(n).label), WeightVersion(n))
+                self.assertEqual(
+                    WeightVersion.parse_label(WeightVersion(n).label), WeightVersion(n)
+                )
 
     def test_prefix(self):
         self.assertEqual(ENGINE_LABEL_PREFIX, "rc-")
@@ -53,16 +77,15 @@ class TestLabelRoundTrip(unittest.TestCase):
     def test_foreign_labels_are_rejected(self):
         """Anything RolloutCore did not write must fail to parse."""
         for bad in ("default", "rc-", "rc-x", "v0", "0", "", "RC-0", "rc-1.5", "rc--1"):
-            with self.subTest(bad=bad):
-                with self.assertRaises(VersionError):
-                    WeightVersion.parse_label(bad)
+            with self.subTest(bad=bad), self.assertRaises(VersionError):
+                WeightVersion.parse_label(bad)
 
     def test_non_string_is_rejected(self):
         with self.assertRaises(VersionError):
             WeightVersion.parse_label(0)  # type: ignore[arg-type]
 
 
-class TestOrdering(unittest.TestCase):
+class TestVersionOrdering(unittest.TestCase):
     def test_ordering(self):
         self.assertLess(WeightVersion(1), WeightVersion(2))
         self.assertGreater(WeightVersion(5), WeightVersion(0))
@@ -102,10 +125,125 @@ class TestCacheSalt(unittest.TestCase):
                     self.assertNotIn(ch, salt)
 
 
-class TestImmutability(unittest.TestCase):
+class TestParamSpec(unittest.TestCase):
+    def test_good(self):
+        spec = ParamSpec("w", "bfloat16", (2, 3))
+        self.assertEqual(spec.canonical(), "w\x1fbfloat16\x1f2,3")
+
+    def test_empty_name_rejected(self):
+        with self.assertRaises(WeightIdentityError):
+            ParamSpec("", "bfloat16", (1,))
+
+    def test_empty_dtype_rejected(self):
+        with self.assertRaises(WeightIdentityError):
+            ParamSpec("w", "", (1,))
+
+    def test_non_tuple_shape_rejected(self):
+        with self.assertRaises(WeightIdentityError):
+            ParamSpec("w", "bfloat16", [1, 2])  # type: ignore[arg-type]
+
+    def test_negative_dim_rejected(self):
+        with self.assertRaises(WeightIdentityError):
+            ParamSpec("w", "bfloat16", (1, -1))
+
+    def test_scalar_shape_allowed(self):
+        self.assertEqual(ParamSpec("w", "float32", ()).canonical(), "w\x1ffloat32\x1f")
+
+
+class TestWeightIdentity(unittest.TestCase):
+    def test_digest_format(self):
+        ident = WeightIdentity.from_pairs(PAIRS)
+        self.assertTrue(ident.digest.startswith(DIGEST_PREFIX))
+        self.assertEqual(len(ident.digest), len(DIGEST_PREFIX) + 64)
+        self.assertEqual(ident.num_tensors, 2)
+
+    def test_is_deterministic(self):
+        self.assertEqual(WeightIdentity.from_pairs(PAIRS), WeightIdentity.from_pairs(PAIRS))
+
+    def test_is_order_independent(self):
+        """A WeightSource need not enumerate in a stable order."""
+        self.assertEqual(
+            WeightIdentity.from_pairs(PAIRS),
+            WeightIdentity.from_pairs(list(reversed(PAIRS))),
+        )
+
+    def test_content_sensitivity(self):
+        base = WeightIdentity.from_pairs(PAIRS)
+        variants = [
+            [("model.embed_tokens.weight", "bfloat16", (151936, 2049)), *PAIRS[1:]],
+            [("model.embed_tokens.weight", "float16", (151936, 2048)), *PAIRS[1:]],
+            [("model.embed_tokens.weight", "bfloat16", (151936, 2048))],
+            [*PAIRS, ("model.norm.weight", "bfloat16", (2048,))],
+        ]
+        for v in variants:
+            with self.subTest(variant=len(v)):
+                self.assertNotEqual(base, WeightIdentity.from_pairs(v))
+
+    def test_duplicate_names_rejected(self):
+        with self.assertRaises(WeightIdentityError):
+            WeightIdentity.from_pairs([PAIRS[0], PAIRS[0]])
+
+    def test_empty_manifest_is_legal(self):
+        ident = WeightIdentity.from_pairs([])
+        self.assertEqual(ident.num_tensors, 0)
+
+    def test_short_is_twelve_hex_chars(self):
+        ident = WeightIdentity.from_pairs(PAIRS)
+        self.assertEqual(len(ident.short), 12)
+        self.assertTrue(ident.short in ident.digest)
+
+    def test_parse_validates(self):
+        good = WeightIdentity.from_pairs(PAIRS).digest
+        self.assertEqual(WeightIdentity.parse(good).digest, good)
+        for bad in ("", "md5:abc", "sha256:xyz", DIGEST_PREFIX + "a" * 63):
+            with self.subTest(bad=bad), self.assertRaises(WeightIdentityError):
+                WeightIdentity.parse(bad)
+
+    def test_uppercase_hex_rejected(self):
+        """Canonical form only, so digests cannot differ by case."""
+        with self.assertRaises(WeightIdentityError):
+            WeightIdentity.parse(DIGEST_PREFIX + "A" * 64)
+
     def test_frozen(self):
+        ident = WeightIdentity.from_pairs(PAIRS)
+        with self.assertRaises(FrozenInstanceError):
+            ident.digest = "sha256:" + "0" * 64  # type: ignore[misc]
+
+
+class TestUpdateTarget(unittest.TestCase):
+    """Amendment 3: generation number and weight identity travel together."""
+
+    def test_carries_both(self):
+        t = UpdateTarget(version=WeightVersion(3), identity=WeightIdentity.from_pairs(PAIRS))
+        self.assertEqual(t.label, "rc-3")
+        self.assertIn("rc-3", t.describe())
+        self.assertIn(t.identity.short, t.describe())
+
+    def test_same_version_different_identity(self):
+        """The reason generation alone cannot satisfy I4."""
+        a = UpdateTarget(WeightVersion(1), WeightIdentity.from_pairs(PAIRS))
+        b = UpdateTarget(WeightVersion(1), WeightIdentity.from_pairs([*PAIRS, ("x", "f32", (1,))]))
+        self.assertEqual(a.version, b.version)
+        self.assertNotEqual(a.identity, b.identity)
+        self.assertNotEqual(a, b)
+
+    def test_equality_and_hashing(self):
+        ident = WeightIdentity.from_pairs(PAIRS)
+        a = UpdateTarget(WeightVersion(1), ident)
+        b = UpdateTarget(WeightVersion(1), ident)
+        self.assertEqual(a, b)
+        self.assertEqual(len({a, b}), 1)
+
+    def test_frozen(self):
+        t = UpdateTarget(WeightVersion(1), WeightIdentity.from_pairs(PAIRS))
+        with self.assertRaises(FrozenInstanceError):
+            t.version = WeightVersion(2)  # type: ignore[misc]
+
+
+class TestImmutability(unittest.TestCase):
+    def test_weight_version_frozen(self):
         v = WeightVersion(1)
-        with self.assertRaises(Exception):
+        with self.assertRaises(FrozenInstanceError):
             v.value = 2  # type: ignore[misc]
 
 
