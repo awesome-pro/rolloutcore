@@ -1,5 +1,9 @@
 # Phase 3A runbook — real vLLM control plane on one GPU
 
+**Status: this runbook has been executed successfully.** The 2026-09-24 run is
+recorded in `docs/phase3a-results.md` (16/16 checks, one A6000, the audited
+commit). The notes below are what it took to get there.
+
 **Goal.** Prove RolloutCore's lifecycle *control plane* against a real `vllm
 serve`: fresh label, bootstrap to `rc-0`, a refused second bootstrap, deterministic
 generation, `pause(mode="wait")` that genuinely waits for in-flight work and does
@@ -86,6 +90,7 @@ Read from the audit checkout (`vendor/vllm-main` @ `00b7847c`), not guessed:
 | CUDA wheel variants | **`cu129`** (default) and **`cu130`** | `setup.py:604` (`supported = {12: "cu129", 13: "cu130"}`) |
 | Default CUDA for a source build | `VLLM_MAIN_CUDA_VERSION = "13.0"` | `vllm/envs.py:91` |
 | Driver for `cu130` | **R580 or newer** (CUDA 13 minimum); `cu129` runs on far older drivers | `docs/getting_started/installation/gpu.cuda.inc.md:327` |
+| Confirmed working (Phase 3A, 2026-09-24) | A6000 48 GB, driver **580.159.03**, CUDA **13.0**, Python 3.12.3, `pip install -U uv` → `cu130`, vLLM `0.30.1rc1.dev60+g00b7847c8`, torch `2.13.0+cu130` | `docs/phase3a-results.md` |
 | Python | `>=3.10,<3.15` | `pyproject.toml:35` |
 | Blackwell (B200/GB200) | needs ≥ CUDA 12.8 | `gpu.cuda.inc.md:39` |
 
@@ -113,13 +118,67 @@ output; it goes into the report.
 
 ## 2. Get the code onto the pod
 
+The repository is **private**, so a plain `https://` clone will stop at
+`Username for 'https://github.com':`. Pick one:
+
+**A. tar over SSH from the Mac (no GitHub auth, and no `rsync` needed on the
+pod — recommended).** In RunPod's Connect panel use the **SSH over exposed TCP**
+tab, not the `ssh.runpod.io` proxy (that one documents "No support for SCP &
+SFTP"):
+
+```bash
+# on the Mac; substitute <host> and <port> from that tab
+tar czf - -C ~/Desktop \
+    --exclude=.venv --exclude=__pycache__ --exclude=.pytest_cache \
+    --exclude=.mypy_cache --exclude=.ruff_cache --exclude=results \
+    rolloutcore \
+  | ssh -p <port> -i ~/.ssh/id_ed25519 root@<host> \
+      'tar xzf - -C /workspace && ls /workspace/rolloutcore'
+```
+
+Keep `.git` in the copy: the artifact records `rolloutcore_sha` from
+`git rev-parse HEAD` inside the repo. (~800 KB, so this is cheap.)
+
+`rsync` is equivalent if the image has it, but note the SSH key must not be a
+bare `~` inside `-e`, which rsync does not expand — use `$HOME`:
+
+```bash
+rsync -av -e "ssh -p <port> -i $HOME/.ssh/id_ed25519" \
+    --exclude .venv --exclude __pycache__ --exclude results \
+    ~/Desktop/rolloutcore/ root@<host>:/workspace/rolloutcore/
+```
+
+**B. A personal access token** (fine for `git` commands, but do not paste the
+token into any chat):
+
 ```bash
 cd /workspace
-git clone https://github.com/<you>/rolloutcore.git && cd rolloutcore
-# or, from the Mac:
-#   rsync -av --exclude .venv --exclude .git ~/Desktop/rolloutcore/ pod:/workspace/rolloutcore/
+git clone https://<TOKEN>@github.com/awesome-pro/rolloutcore.git && cd rolloutcore
+```
+
+A classic PAT needs `repo` scope; a fine-grained token needs *Contents: Read*.
+The repository name is **`awesome-pro`** — a missing letter gives the credential
+prompt too, so check it before assuming the token is wrong.
+
+**C. Upload a tarball** through Jupyter's file browser, then
+`tar xzf rolloutcore.tgz` in `/workspace`.
+
+A tarball extracted as root keeps the Mac's uid, so git refuses it with
+`detected dubious ownership in repository`:
+
+```bash
+chown -R root:root /workspace/rolloutcore
+# or, if you prefer not to chown:
+#   git config --global --add safe.directory /workspace/rolloutcore
+```
+
+Then, whichever route you took:
+
+```bash
+cd /workspace/rolloutcore
 python3 -V                        # >= 3.11
-git rev-parse HEAD               # this SHA is recorded in the artifact
+git rev-parse HEAD 2>/dev/null || echo "rsync copy: record the Mac's HEAD instead"
+ls src/rolloutcore scripts/live_control_plane_smoke.py tests/fake_dev_server.py
 ```
 
 RolloutCore itself needs **nothing installed** — the harness is pure stdlib and
@@ -155,12 +214,27 @@ uv pip install vllm --torch-backend=auto \
     --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
 ```
 
-`--torch-backend=auto` reads the driver and picks `cu129`/`cu130` for you. If it
+!!! warning "`uv` must know the backend name"
+
+    `--torch-backend` is an enum inside `uv`, and it lags the CUDA variants vLLM
+    publishes. **uv 0.9.0 tops out at `cu129`** and rejects `cu130` outright
+    (`invalid value 'cu130' for '--torch-backend'`), regardless of the driver.
+    Either `uv self update` (or `pip install -U uv`) and retry `cu130`, or just
+    install the **`cu129`** variant: a CUDA 12.9 build runs fine on a 580-series
+    driver, which is newer than CUDA 12.9 requires. Confirmed working on
+    uv 0.9.0 + driver 580.159 + A6000.
+
+`--torch-backend=auto` reads the driver and picks the PyTorch index for you. If it
 guesses wrong, name the variant explicitly:
 
 ```bash
+# cu130 (needs a uv that supports it):
 uv pip install vllm --torch-backend=cu130 \
     --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cu130
+
+# cu129 (works on uv 0.9.0, and on any driver that supports CUDA 12.9):
+uv pip install vllm --torch-backend=cu129 \
+    --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cu129
 ```
 
 `pip` is **not** supported against vLLM's nightly/commit indices (it merges
@@ -186,12 +260,27 @@ that warning back with the results:
 uv pip install vllm --torch-backend=auto
 ```
 
-Then confirm both the version and that the dev endpoints exist at all:
+Then confirm the version **without importing vllm first**. An import failure
+would otherwise hide which build you actually got:
 
 ```bash
-python3 -c "import vllm; print(vllm.__version__)"   # dev builds embed the commit
-python3 -c "import vllm.entrypoints.serve.dev.rlhf.api_router as r; print('dev rlhf router OK', len(r.router.routes))"
+python3 -c "import importlib.metadata as m; print('vllm', m.version('vllm')); print('torch', m.version('torch'))"
+python3 -c "import torch; print('torch cuda', torch.version.cuda, 'available', torch.cuda.is_available())"
+python3 -c "import vllm; print('vllm imports OK', vllm.__version__)"
+python3 -c "import vllm.entrypoints.serve.dev.rlhf.api_router as r; print('dev router OK', len(r.router.routes))"
 ```
+
+The metadata version must contain the commit (`g00b7847c8`). If it is a plain
+release like `0.23.1`, then the commit index did not serve the request and uv
+silently resolved against PyPI — you have the wrong build, and any CUDA-variant
+mismatch will show up as an import error rather than a version mismatch.
+
+**Variant consistency is mandatory.** The vLLM wheel and torch must come from the
+same CUDA family. Mixing them produces
+`ImportError: libcudart.so.13: cannot open shared object file` (a cu130 vLLM wheel
+with cu129 torch) or the mirror image. Install both in one command from one
+variant, and if you change your mind, recreate the venv rather than layering a
+second install on top.
 
 **Checkpoint CP2 — proceed only if** `vllm` imports and `vllm serve --help`
 works. If you installed C instead of A/B, say so in the report; do not silently
@@ -225,6 +314,52 @@ cd /workspace/rolloutcore
 export VLLM_SERVER_DEV_MODE=1            # exposes /pause, /weight_info, /reset_*
 export VLLM_ENABLE_V1_MULTIPROCESSING=1  # engine core OUT of process
 ```
+
+### tmux in one minute
+
+The pod's terminal disconnects; a server started in a plain shell dies with it.
+
+```
+tmux new -s vllm        # create and attach a named session
+Ctrl-b  d               # detach -> keeps running
+tmux ls                 # list sessions
+tmux attach -t vllm     # reattach
+tmux kill-session -t vllm
+```
+
+Inside a session: `Ctrl-b c` new window, `Ctrl-b n` / `Ctrl-b p` next/previous,
+`Ctrl-b 0` window 0, `Ctrl-b [` scroll mode (arrows, then `q` to exit).
+
+**The prefix is a two-step chord, not a combination.** Press `Ctrl-b`, *release
+both keys*, then press the next key on its own. Holding Ctrl through the second
+key sends `Ctrl-c` instead, which kills whatever is in the foreground.
+
+If the prefix keeps fighting your terminal, don't fight it:
+
+- **A second SSH session is the simplest fix.** Keep the server in tmux window 0
+  and open another terminal on your Mac, `ssh` in again, and run the harness
+  there. `tmux attach -t vllm` is only needed if you want to *watch* the server.
+- **Or skip tmux for the server entirely** — `nohup` survives a disconnect just
+  as well:
+
+  ```bash
+  nohup vllm serve facebook/opt-125m --host 127.0.0.1 --port 8000 \
+      --enforce-eager --max-model-len 512 --gpu-memory-utilization 0.6 \
+      > /workspace/server.log 2>&1 &
+  tail -f /workspace/server.log        # watch startup, Ctrl-c to stop watching
+  ```
+
+- **Browsers eat `Ctrl-b`** (Firefox opens the bookmarks sidebar with it). If you
+  are using RunPod's web terminal, switch to SSH from a real terminal, or rebind
+  the prefix before starting tmux:
+
+  ```bash
+  printf 'set -g prefix C-a\nbind C-a send-prefix\n' > ~/.tmux.conf
+  ```
+
+Suggested layout: window 0 runs the server, window 1 runs the harness. Or use
+`--launch` in step 6, which starts and stops the server itself — still do it
+inside tmux so an accidental disconnect cannot kill the run mid-drain.
 
 `VLLM_ENABLE_V1_MULTIPROCESSING=1` is the default, but say it explicitly: the
 in-process engine path rejects `mode="wait"` outright
@@ -392,6 +527,9 @@ actually showed.
 | CUDA OOM at startup | `--max-model-len`/`--gpu-memory-utilization` too high for the pod | lower both; 512 / 0.6 is already conservative |
 | `connection refused` on `/health` | server still loading or crashed | the launcher waits up to 900 s and prints the log tail on failure |
 | `environment` warns | vLLM is not the audited commit | record it in the report; do not hide it |
+| `ImportError: libcudart.so.13` (or `.so.12`) | vLLM wheel and torch came from different CUDA variants | `rm -rf .venv`, recreate it, and install both from one variant in a single `uv pip install` — never layer a second install over a mismatched one |
+| `invalid value 'cu130' for '--torch-backend'` | `--torch-backend` is an uv enum, and uv 0.9.0 stops at `cu129` | `pip install -U uv`, or use `cu129` (fine on a 580 driver) |
+| `fatal: detected dubious ownership` | a tarball copied from the Mac carried uid 501 into a root shell | `chown -R root:root /workspace/rolloutcore`, or add a `safe.directory` exception |
 | `CUDA driver version is insufficient for CUDA runtime version` | the wheel is `cu130` but the driver is older than R580 (`gpu.cuda.inc.md:327`) | reinstall with `--torch-backend=cu129`, or move to a pod whose driver is R580+ |
 | torch ended up at the wrong version | it was installed by hand, or by `pip` against a nightly index | never pin torch yourself: it is pinned at `2.13.0` by `requirements/cuda.txt:7`. Reinstall with `uv` (step 3) |
 | an old image ships PyTorch 2.4 / CUDA 12.4 | stale template, ~9 minors behind this commit | use `vllm/vllm-openai`, or install vLLM per step 3; the template's torch does not matter once `uv --torch-backend=auto` runs |
