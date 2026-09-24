@@ -10,6 +10,10 @@ invalidly-constructed controller.
 
 from __future__ import annotations
 
+import unittest
+from collections.abc import Callable
+from typing import Any
+
 from rolloutcore import (
     BootstrapEvidence,
     DrainEvidence,
@@ -253,3 +257,49 @@ def assert_state_unchanged(test, ctrl: LifecycleController, fn):
     )
     test.assertEqual(before, after, "controller mutated by a rejected event")
     return ctx.exception
+
+
+def function_tests(namespace: dict[str, Any]) -> Callable[..., unittest.TestSuite]:
+    """A ``load_tests`` hook that adopts module-level ``test_*`` functions.
+
+    ``unittest`` only collects ``TestCase`` subclasses; pytest collects plain
+    module-level functions as well. Two modules here are written as functions
+    (`test_controller_threading.py`, `test_script_hygiene.py`), and without this
+    the dependency-free runner -- the step CI runs *before* installing pytest --
+    silently executed 317 of 326 tests. Silently is the problem: the five hygiene
+    tests were among the invisible ones.
+
+    A module that defines plain test functions ends with::
+
+        load_tests = function_tests(globals())
+
+    which keeps the bodies as ordinary functions (no re-indentation, no change in
+    what they assert) and hands ``unittest`` a suite containing both the
+    functions and anything ``unittest`` found on its own, so a future
+    ``TestCase`` in the same module is not dropped.
+    """
+
+    functions = {
+        name: value
+        for name, value in namespace.items()
+        if name.startswith("test_") and callable(value)
+    }
+
+    class _Functions(unittest.TestCase):
+        pass
+
+    for name, function in functions.items():
+        setattr(_Functions, name, staticmethod(function))
+
+    def load_tests(
+        loader: unittest.TestLoader,
+        standard_tests: unittest.TestSuite,
+        pattern: str | None,
+    ) -> unittest.TestSuite:
+        del pattern
+        suite = unittest.TestSuite()
+        suite.addTests(standard_tests)
+        suite.addTests(loader.loadTestsFromTestCase(_Functions))
+        return suite
+
+    return load_tests

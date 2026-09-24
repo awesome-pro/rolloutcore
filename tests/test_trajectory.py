@@ -13,10 +13,11 @@ provenance* differs.
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
+import unittest
 from pathlib import Path
 
-import pytest
 from support import IDENTITY_V0
 
 from rolloutcore import (
@@ -31,6 +32,20 @@ from rolloutcore import (
 )
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def temp_dir(test: unittest.TestCase) -> Path:
+    """A per-test temporary directory: the replacement for the ``tmp_path`` fixture.
+
+    unittest has no fixtures, so the test asks for a directory and registers its
+    cleanup -- it lives until ``addCleanup`` runs at the end of that test, exactly
+    as a fixture did. Defined here because ``test_replay`` already imports this
+    module's helpers for the same reason.
+    """
+    tmp = tempfile.TemporaryDirectory()
+    test.addCleanup(tmp.cleanup)
+    return Path(tmp.name)
+
 
 STEP0 = WeightProvenance(checkpoint="facebook/opt-125m", run_id="run-7", step=0)
 STEP1 = WeightProvenance(checkpoint="facebook/opt-125m", run_id="run-7", step=1)
@@ -76,7 +91,7 @@ def trajectory(**overrides: object) -> Trajectory:
     return Trajectory(**kwargs)  # type: ignore[arg-type]
 
 
-class TestWhatATrajectoryClaims:
+class TestWhatATrajectoryClaims(unittest.TestCase):
     def test_a_manifest_only_identity_is_not_replay_ready(self):
         """The honest gate: an architecture is not a training step."""
         t = trajectory()
@@ -126,23 +141,27 @@ class TestWhatATrajectoryClaims:
         assert t.admission_agrees is True
 
 
-class TestValidation:
+class TestValidation(unittest.TestCase):
+    # The previous runner matched with a `re.search`, and `assertRaisesRegex` is
+    # the same search, so these patterns carry over unchanged. Each is literal
+    # text -- no metacharacters to escape -- and each was checked against the
+    # message it must still match.
     def test_a_prompt_is_required(self):
-        with pytest.raises(TrajectoryError, match="non-empty prompt"):
+        with self.assertRaisesRegex(TrajectoryError, "non-empty prompt"):
             trajectory(prompt="")
 
     def test_token_ids_must_be_ints(self):
-        with pytest.raises(TrajectoryError, match="tuple of ints"):
+        with self.assertRaisesRegex(TrajectoryError, "tuple of ints"):
             trajectory(token_ids=(1, "two"))
-        with pytest.raises(TrajectoryError, match="tuple of ints"):
+        with self.assertRaisesRegex(TrajectoryError, "tuple of ints"):
             trajectory(token_ids=(1, True))
 
     def test_negative_seconds_are_rejected(self):
-        with pytest.raises(TrajectoryError, match="seconds"):
+        with self.assertRaisesRegex(TrajectoryError, "seconds"):
             trajectory(seconds=-1.0)
 
 
-class TestLogprobs:
+class TestLogprobs(unittest.TestCase):
     """The field the replay validator reads (item 8).
 
     Its shape is an invariant, not a convention: ``ReplayPlan`` compares position
@@ -152,23 +171,23 @@ class TestLogprobs:
 
     def test_logprobs_must_be_one_per_generated_token(self):
         trajectory(token_ids=(1, 2), logprobs=(-0.1, -0.2))
-        with pytest.raises(TrajectoryError, match="one per generated token"):
+        with self.assertRaisesRegex(TrajectoryError, "one per generated token"):
             trajectory(token_ids=(1, 2), logprobs=(-0.1,))
-        with pytest.raises(TrajectoryError, match="one per generated token"):
+        with self.assertRaisesRegex(TrajectoryError, "one per generated token"):
             trajectory(token_ids=(1, 2), logprobs=(-0.1, -0.2, -0.3))
 
     def test_logprobs_may_be_absent(self):
         assert trajectory(token_ids=(1, 2)).logprobs == ()
 
     def test_logprobs_must_be_real_numbers(self):
-        with pytest.raises(TrajectoryError, match="real numbers"):
+        with self.assertRaisesRegex(TrajectoryError, "real numbers"):
             trajectory(token_ids=(1,), logprobs=("low",))
-        with pytest.raises(TrajectoryError, match="real numbers"):
+        with self.assertRaisesRegex(TrajectoryError, "real numbers"):
             trajectory(token_ids=(1, 2), logprobs=(-0.1, None))
 
     def test_a_bool_is_not_a_logprob(self):
         """`bool` is an `int`; `True` would pass every arithmetic comparison."""
-        with pytest.raises(TrajectoryError, match="real numbers"):
+        with self.assertRaisesRegex(TrajectoryError, "real numbers"):
             trajectory(token_ids=(1,), logprobs=(True,))
 
     def test_logprobs_survive_a_round_trip(self):
@@ -189,7 +208,7 @@ class TestLogprobs:
             assert Trajectory.from_json(record.to_json()) == record
 
 
-class TestCodec:
+class TestCodec(unittest.TestCase):
     def test_a_declared_source_survives_a_round_trip(self):
         """`WeightIdentity.parse` would drop the provenance; this must not."""
         original = trajectory(
@@ -209,7 +228,8 @@ class TestCodec:
         assert restored.exactness == "manifest-only"
         assert restored.provenance is None
 
-    def test_jsonl_round_trip_preserves_order_and_identity(self, tmp_path: Path):
+    def test_jsonl_round_trip_preserves_order_and_identity(self):
+        tmp_path = temp_dir(self)
         recorder = TrajectoryRecorder()
         v0, v1 = identity_for(STEP0), identity_for(STEP1)
         recorder.record(trajectory(binding=binding(version=0, identity=v0)))
@@ -223,7 +243,7 @@ class TestCodec:
         assert all(t.replay_ready for t in restored)
 
 
-class TestRecorder:
+class TestRecorder(unittest.TestCase):
     def test_manifest_only_records_are_surfaced_not_hidden(self):
         recorder = TrajectoryRecorder()
         recorder.record(trajectory())

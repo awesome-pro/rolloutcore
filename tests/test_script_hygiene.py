@@ -19,6 +19,8 @@ import ast
 import re
 from pathlib import Path
 
+from support import function_tests
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = [*sorted(REPO.glob("scripts/*.py")), *sorted(REPO.glob("diagnostics/*.py"))]
 
@@ -128,3 +130,9 @@ def test_no_script_kills_its_own_process_group() -> None:
         "group, so the kill would hit the script itself. Start the child with "
         "start_new_session=True."
     )
+
+
+# See `tests/test_controller_threading.py`: the functions above are plain, and
+# `unittest` needs the adapter to collect them. The tests here are the ones that
+# catch a broken probe, so a runner that silently skips them is worse than useless.
+load_tests = function_tests(globals())

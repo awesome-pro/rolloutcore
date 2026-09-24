@@ -13,7 +13,7 @@ from __future__ import annotations
 import sys
 import threading
 
-from support import bootstrapped, good_drain
+from support import bootstrapped, function_tests, good_drain
 
 from rolloutcore import LifecycleState
 
@@ -155,3 +155,9 @@ def test_a_reader_never_sees_a_half_updated_rollout_set() -> None:
     assert not failures, failures
     assert not churner.is_alive()
     assert all(isinstance(count, int) for count in seen)
+
+
+# `unittest` collects only TestCase subclasses, so without this the four functions
+# above are invisible to the dependency-free runner that CI runs first. pytest
+# ignores this hook and collects the functions directly.
+load_tests = function_tests(globals())

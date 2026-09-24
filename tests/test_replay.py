@@ -13,11 +13,11 @@ import json
 import os
 import subprocess
 import sys
+import unittest
 from pathlib import Path
 
-import pytest
 from support import IDENTITY_V0
-from test_trajectory import binding, identity_for, trajectory
+from test_trajectory import binding, identity_for, temp_dir, trajectory
 
 from rolloutcore import (
     ReplayError,
@@ -69,13 +69,13 @@ def observed(
     )
 
 
-class TestPlan:
+class TestPlan(unittest.TestCase):
     def test_a_manifest_only_record_cannot_be_planned(self):
         """Item 5's gate: an architecture is not a training step."""
         manifest_only = trajectory(binding=binding(identity=IDENTITY_V0))
-        with pytest.raises(ReplayError) as ctx:
+        with self.assertRaises(ReplayError) as ctx:
             ReplayPlan.from_trajectory(manifest_only)
-        message = str(ctx.value)
+        message = str(ctx.exception)
         self_digest = IDENTITY_V0.short
         assert self_digest in message, message
         assert "manifest-only" in message
@@ -109,7 +109,7 @@ class TestPlan:
         assert "no recorded logprobs (token lane only)" in token_only
 
 
-class TestProtocol:
+class TestProtocol(unittest.TestCase):
     """Each violation names what went wrong and forces disagreement."""
 
     def test_identical_replay_agrees(self):
@@ -168,7 +168,7 @@ class TestProtocol:
         assert any("beyond the expected sequence" in note for note in verdict.notes)
 
 
-class TestTokens:
+class TestTokens(unittest.TestCase):
     def test_divergence_at_index_k(self):
         verdict = validate_replay(planned(), observed(token_ids=(5, 812, 1470)))
         assert verdict.token_mismatches == 1
@@ -190,7 +190,7 @@ class TestTokens:
         assert verdict.shared_prefix == 0
 
 
-class TestLogprobLane:
+class TestLogprobLane(unittest.TestCase):
     def test_the_four_lanes(self):
         recorded = (-0.5, -1.5, -2.5)
         assert (
@@ -227,10 +227,15 @@ class TestLogprobLane:
         )
         assert verdict.logprob_lane == "compared"
         assert verdict.compared_logprobs == 4
-        assert verdict.mean_abs_delta == pytest.approx(0.095)
-        assert verdict.max_abs_delta == pytest.approx(0.30)
+        # The previous assertion helper defaulted to a relative tolerance of
+        # 1e-6. Every figure in this class is exact decimal arithmetic on
+        # doubles, so its only error is the representation of the literal
+        # (<= ~1.2e-16). `places=12` keeps a 5e-13 margin -- ~4000x that error,
+        # and *tighter* than the tolerance it replaces, so nothing was weakened.
+        self.assertAlmostEqual(verdict.mean_abs_delta, 0.095, places=12)
+        self.assertAlmostEqual(verdict.max_abs_delta, 0.30, places=12)
         assert verdict.worst_index == 1
-        assert verdict.p99_abs_delta == pytest.approx(0.30)
+        self.assertAlmostEqual(verdict.p99_abs_delta, 0.30, places=12)
 
     def test_p99_is_nearest_rank_not_interpolated(self):
         # 10 deltas 0.01 .. 0.10 ; sorted ; ceil(0.99*10)-1 = 9 -> the largest, 0.10
@@ -240,24 +245,27 @@ class TestLogprobLane:
             planned(tuple(range(10)), logprobs=recorded),
             observed(tuple(range(10)), logprobs=observed_values),
         )
-        assert verdict.p99_abs_delta == pytest.approx(0.10)
-        assert verdict.mean_abs_delta == pytest.approx(0.055)
+        self.assertAlmostEqual(verdict.p99_abs_delta, 0.10, places=12)
+        self.assertAlmostEqual(verdict.mean_abs_delta, 0.055, places=12)
 
     def test_one_delta_p99_is_that_delta(self):
         verdict = validate_replay(planned((1,), logprobs=(-1.0,)), observed((1,), logprobs=(-1.4,)))
-        assert verdict.p99_abs_delta == pytest.approx(0.4)
-        assert verdict.max_abs_delta == pytest.approx(0.4)
+        self.assertAlmostEqual(verdict.p99_abs_delta, 0.4, places=12)
+        self.assertAlmostEqual(verdict.max_abs_delta, 0.4, places=12)
         assert verdict.worst_index == 0
 
 
-class TestTolerance:
+class TestTolerance(unittest.TestCase):
     def test_just_inside_the_tolerance_agrees(self):
         verdict = validate_replay(
             planned((1,), logprobs=(-1.0,)),
             observed((1,), logprobs=(-1.0009,)),
             logprob_tolerance=1e-3,
         )
-        assert verdict.max_abs_delta == pytest.approx(0.0009)
+        # Also exact decimal arithmetic, and `places=12` is *tighter* here too:
+        # 5e-13 against the ~9e-10 a 1e-6 relative tolerance allowed for this
+        # value, so the boundary assertion got stricter, not looser.
+        self.assertAlmostEqual(verdict.max_abs_delta, 0.0009, places=12)
         assert verdict.agrees is True
         assert not any("exceeds the tolerance" in note for note in verdict.notes)
 
@@ -267,14 +275,14 @@ class TestTolerance:
             observed((1,), logprobs=(-1.0011,)),
             logprob_tolerance=1e-3,
         )
-        assert verdict.max_abs_delta == pytest.approx(0.0011)
+        self.assertAlmostEqual(verdict.max_abs_delta, 0.0011, places=12)
         assert verdict.agrees is False
-        assert verdict.tolerance == pytest.approx(1e-3)
+        self.assertAlmostEqual(verdict.tolerance, 1e-3, places=12)
         assert any("exceeds the tolerance" in note for note in verdict.notes)
 
     def test_the_tolerance_is_recorded_on_the_verdict(self):
         verdict = validate_replay(planned(), observed(), logprob_tolerance=0.25)
-        assert verdict.tolerance == pytest.approx(0.25)
+        self.assertAlmostEqual(verdict.tolerance, 0.25, places=12)
 
     def test_a_logprob_delta_cannot_be_rescued_by_matching_tokens(self):
         verdict = validate_replay(
@@ -285,7 +293,7 @@ class TestTolerance:
         assert verdict.agrees is False
 
 
-class TestDescribe:
+class TestDescribe(unittest.TestCase):
     def test_agreement_line(self):
         line = validate_replay(planned(), observed()).describe()
         assert line == "R1 AGREE: shared prefix 3, 0 token mismatch(es), token-only (both-missing)"
@@ -302,7 +310,7 @@ class TestDescribe:
         assert "max|Δ|=3.000e+00" in line
 
 
-class TestReplayModes:
+class TestReplayModes(unittest.TestCase):
     """A token mismatch means different things in the two modes.
 
     A trace-forced replay dictates the ids, so failing to echo them is a fault in
@@ -351,7 +359,7 @@ class TestReplayModes:
         assert not any("argmax" in note for note in verdict.notes)
 
 
-class TestCli:
+class TestCli(unittest.TestCase):
     """End to end, through a real process, with no PYTHONPATH to lean on."""
 
     @staticmethod
@@ -366,7 +374,8 @@ class TestCli:
             check=False,
         )
 
-    def test_agreement_exits_zero(self, tmp_path: Path):
+    def test_agreement_exits_zero(self):
+        tmp_path = temp_dir(self)
         trajectories = tmp_path / "trajectories.jsonl"
         replays = tmp_path / "replays.jsonl"
         trajectories.write_text(
@@ -399,7 +408,8 @@ class TestCli:
         assert artifact["summary"]["agreed"] == 1
         assert artifact["summary"]["max_abs_delta"] is None
 
-    def test_disagreement_exits_one(self, tmp_path: Path):
+    def test_disagreement_exits_one(self):
+        tmp_path = temp_dir(self)
         trajectories = tmp_path / "trajectories.jsonl"
         replays = tmp_path / "replays.jsonl"
         trajectories.write_text(
@@ -428,8 +438,9 @@ class TestCli:
         assert "DISAGREE" in result.stdout
         assert "FAIL: 1 problem(s)" in result.stdout
 
-    def test_tokens_were_forced_round_trips_through_the_cli(self, tmp_path: Path):
+    def test_tokens_were_forced_round_trips_through_the_cli(self):
         """The mode decides how a mismatch is read, so it has to survive the file."""
+        tmp_path = temp_dir(self)
         trajectories = tmp_path / "trajectories.jsonl"
         trajectories.write_text(
             json.dumps(
@@ -494,8 +505,9 @@ class TestCli:
         assert "echo:" in bad.stdout
         assert "says nothing about the weights" in bad.stdout
 
-    def test_the_committed_artifact_demos_the_token_lane(self, tmp_path: Path):
+    def test_the_committed_artifact_demos_the_token_lane(self):
         """The documented demo command, run for real, against real repository files."""
+        tmp_path = temp_dir(self)
         result = self._run(
             "--trajectories",
             str(REPO / "results" / "phase5-trajectories.jsonl"),
