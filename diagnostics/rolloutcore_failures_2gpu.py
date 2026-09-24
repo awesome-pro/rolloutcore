@@ -137,7 +137,20 @@ def start_vllm_server(log_path: Path) -> subprocess.Popen[str]:
         log.write("# " + " ".join(args) + "\n")
         log.write("# VLLM_SERVER_DEV_MODE=1 VLLM_ENABLE_V1_MULTIPROCESSING=1\n")
         log.flush()
-        proc = subprocess.Popen(args, env=env, stdout=log, stderr=subprocess.STDOUT, text=True)
+        # `start_new_session=True` is load-bearing here, not hygiene. Scenario C
+        # has to SIGKILL the engine's *whole process group* (vLLM spawns an
+        # EngineCore child), which only means anything if the engine has a group
+        # of its own. Without it the server inherits this script's group, and the
+        # kill takes the harness down with it -- which is exactly what the first
+        # run of this script did.
+        proc = subprocess.Popen(
+            args,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
     try:
         _await_ready(proc)
     except BaseException:
@@ -146,22 +159,60 @@ def start_vllm_server(log_path: Path) -> subprocess.Popen[str]:
     return proc
 
 
+def _our_process_group() -> int:
+    return os.getpgid(0)
+
+
+def _own_group(proc: subprocess.Popen[str]) -> int | None:
+    """The server's process group, or ``None`` if it is not its own leader.
+
+    Guards every `killpg` in this file. A server that shares our group would make
+    `killpg` a self-destruct button, so it is checked rather than assumed.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:  # pragma: no cover - already gone
+        return None
+    if pgid == _our_process_group():
+        return None
+    return pgid
+
+
 def _terminate(proc: subprocess.Popen[str]) -> None:
-    """Stop the server's whole process group: SIGTERM, then SIGKILL. Idempotent."""
+    """Stop the server's own process group: SIGTERM, then SIGKILL. Idempotent."""
     if proc.poll() is not None:
         return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except ProcessLookupError:  # pragma: no cover - already gone
+    pgid = _own_group(proc)
+    if pgid is None:
+        # Do not killpg: fall back to the single process rather than the harness.
+        print("[warn] server is not in its own process group; killing it alone")
+        proc.terminate()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=30)
         return
+    os.killpg(pgid, signal.SIGTERM)
     try:
         proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:  # pragma: no cover - already gone
-            return
+        os.killpg(pgid, signal.SIGKILL)
         proc.wait(timeout=30)
+
+
+def _kill_engine_hard(proc: subprocess.Popen[str]) -> None:
+    """SIGKILL the engine's whole group. Refuses if that group is ours.
+
+    Scenario C needs the EngineCore child dead too, so a single-process kill would
+    not be a substitute -- it would leave a half-dead engine and make the scenario
+    meaningless. Fail loudly instead.
+    """
+    pgid = _own_group(proc)
+    if pgid is None:
+        raise RuntimeError("refusing to killpg: the server does not have its own process group")
+    os.killpg(pgid, signal.SIGKILL)
+    proc.wait(timeout=30)
 
 
 def _await_ready(proc: subprocess.Popen[str]) -> None:
@@ -552,8 +603,7 @@ def main() -> int:
         assert ctrl4.state is LifecycleState.READY, ctrl4.state
         dead_target = ctrl4.next_target(driver4.identity())
         print(f"[C] SIGKILL the engine's process group (pid {server_c.pid})")
-        os.killpg(os.getpgid(server_c.pid), signal.SIGKILL)
-        server_c.wait(timeout=30)
+        _kill_engine_hard(server_c)
 
         # C1 -- the drain path. The failure surfaces through `await_drain`, which
         # the runner calls with `_observe`, and `_observe` deliberately does not

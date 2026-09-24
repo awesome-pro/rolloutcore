@@ -93,3 +93,38 @@ def test_the_status_only_probe_exists_where_health_is_polled() -> None:
         text = (REPO / name).read_text(encoding="utf-8")
         assert "/health" in text, f"{name} no longer waits for readiness at all"
         assert not offending_lines(text), name
+
+
+def killpg_without_own_session(text: str) -> bool:
+    """True if a file signals a process *group* it never put in its own session.
+
+    ``os.killpg`` needs the target to be a group leader, which is what
+    ``start_new_session=True`` on the ``Popen`` buys. Without it the child
+    inherits this process's group, so ``killpg`` --- meant to take down a
+    ``vllm serve`` and its EngineCore child --- takes down the harness instead.
+
+    That is not hypothetical: Phase 4B's first two pod runs ended with the shell
+    printing "Terminated" because the script SIGTERM'd itself at the start of
+    scenario C, which is also why no artifact was written.
+    """
+    return "os.killpg" in text and "start_new_session=True" not in text
+
+
+def test_a_script_that_kills_a_process_group_creates_one() -> None:
+    assert killpg_without_own_session("import os\nos.killpg(os.getpgid(pid), 9)\n")
+    assert not killpg_without_own_session(
+        "import os\nPopen(cmd, start_new_session=True)\nos.killpg(pgid, 9)\n"
+    )
+
+
+def test_no_script_kills_its_own_process_group() -> None:
+    offenders = [
+        path.relative_to(REPO).as_posix()
+        for path in SCRIPTS
+        if killpg_without_own_session(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        f"{offenders} call os.killpg on a child that shares their own process "
+        "group, so the kill would hit the script itself. Start the child with "
+        "start_new_session=True."
+    )
