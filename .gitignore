@@ -11,5 +11,5 @@ dist/
 build/
 *.egg-info/
 results/*
-!results/phase3a.json
+!results/*.json
 !results/*.md

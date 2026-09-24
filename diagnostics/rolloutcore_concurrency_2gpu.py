@@ -47,6 +47,7 @@ import sys
 import threading
 import time
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -234,15 +235,24 @@ def world_size() -> int:
 
 
 def git_revision() -> tuple[str, bool]:
-    """``(HEAD, dirty)`` for this repo, tracked files only. Never fatal."""
+    """``(HEAD, dirty)`` for the code under test. Never fatal.
+
+    Scoped to the code directories on purpose. The pod's tree legitimately lacks
+    the tracked data files under ``results/`` (the copy excludes them), and git
+    reports a missing tracked file as a modification -- which would mark every
+    artifact dirty and make the flag worthless.
+    """
 
     def run(*args: str) -> str:
         return subprocess.run(
             ["git", *args], cwd=_REPO, capture_output=True, text=True, check=True
         ).stdout.strip()
 
+    code = ("src", "tests", "scripts", "diagnostics")
     try:
-        return run("rev-parse", "HEAD"), bool(run("status", "--porcelain", "--untracked-files=no"))
+        return run("rev-parse", "HEAD"), bool(
+            run("status", "--porcelain", "--untracked-files=no", "--", *code)
+        )
     except (OSError, subprocess.CalledProcessError):
         return "unknown", True
 
@@ -267,6 +277,7 @@ def server_log_tail(lines: int = 25) -> str:
 
 def main() -> int:
     report: dict[str, Any] = {"phase": "4A", "model": MODEL_NAME, "ok": False}
+    report["started_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     sha, dirty = git_revision()
     report["rolloutcore_sha"] = sha
     report["rolloutcore_dirty"] = dirty

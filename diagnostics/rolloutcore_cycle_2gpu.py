@@ -42,6 +42,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -199,11 +200,13 @@ def world_size() -> int:
 
 
 def git_revision() -> tuple[str, bool]:
-    """``(HEAD, dirty)`` for this repo, tracked files only. Never fatal.
+    """``(HEAD, dirty)`` for the code under test. Never fatal.
 
-    ``--untracked-files=no`` matters: an untracked note in the working tree is
-    not a code change, and letting it mark every run dirty would make the flag
-    meaningless.
+    Scoped to the code directories on purpose. ``--untracked-files=no`` because an
+    untracked note is not a code change; and the scope because the pod's tree
+    legitimately lacks the tracked data files under ``results/`` (the copy
+    excludes them), which git would otherwise report as modifications and mark
+    every artifact dirty.
     """
 
     def run(*args: str) -> str:
@@ -211,8 +214,11 @@ def git_revision() -> tuple[str, bool]:
             ["git", *args], cwd=_REPO, capture_output=True, text=True, check=True
         ).stdout.strip()
 
+    code = ("src", "tests", "scripts", "diagnostics")
     try:
-        return run("rev-parse", "HEAD"), bool(run("status", "--porcelain", "--untracked-files=no"))
+        return run("rev-parse", "HEAD"), bool(
+            run("status", "--porcelain", "--untracked-files=no", "--", *code)
+        )
     except (OSError, subprocess.CalledProcessError):
         return "unknown", True
 
@@ -259,6 +265,7 @@ def generate() -> dict[str, Any]:
 
 def main() -> int:
     report: dict[str, Any] = {"phase": "3C", "model": MODEL_NAME, "ok": False}
+    report["started_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     sha, dirty = git_revision()
     report["rolloutcore_sha"] = sha
     report["rolloutcore_dirty"] = dirty

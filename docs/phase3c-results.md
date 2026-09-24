@@ -68,8 +68,30 @@ server started from garbage and received them over NCCL. Same text, same prompt,
 same `temperature=0`. So the bytes that arrived over the wire are the bytes the
 loader would have produced — which is what "the transfer works" has to mean.
 
-The `before` output is the control: 16 consecutive BOS tokens (id 2), which is
-what `--load-format dummy` predicts for a model whose embeddings are uninitialized.
+The `before` output is the control: the same `<s>` token sixteen times
+(`token_ids` are all `0` in the artifact), which is what `--load-format dummy`
+predicts for a model whose embeddings were never initialized.
+
+## Measurements
+
+From `results/phase3c.json`:
+
+| | |
+|---|---|
+| Cycle, `READY → … → READY`, incl. the NCCL transfer | **0.673 s** |
+| 16-token generation at `rc-0` (dummy weights) | 0.314 s |
+| 16-token generation at `rc-1` (real weights) | 0.130 s |
+| Identity, both versions | `925369d663bc (manifest-only)` |
+
+The 0.673 s cycle is this phase's **floor**: nothing was in flight, so the drain
+had nothing to wait for. Phase 4A runs the same cycle with a rollout to wait for,
+and it takes 2.149 s, of which 1.375 s is the drain holding for that rollout. The
+two together are the honest picture — the cycle is cheap when it has no one to
+wait for, and it is *supposed* to be slow when it does.
+
+The two generation times are not a benchmark (different weights, different
+warm-up state, one request each); they are recorded only so the 4A comparison has
+a baseline.
 
 ## The limitation this run exposes
 

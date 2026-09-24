@@ -1,0 +1,81 @@
+{
+  "phase": "4A",
+  "model": "facebook/opt-125m",
+  "ok": true,
+  "rolloutcore_sha": "b48ae00332de6b8badc2133a767cdbe07566c5e6",
+  "rolloutcore_dirty": true,
+  "vllm_version": "0.30.1rc1.dev60+g00b7847c8",
+  "baseline": {
+    "text": "<s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s>",
+    "finish_reason": "length",
+    "weight_version": "rc-0"
+  },
+  "pre_update_binding": {
+    "request_id": "R-long",
+    "version": "rc-0",
+    "cache_salt": "rc-0"
+  },
+  "world_size": 2,
+  "identity": "925369d663bc (manifest-only)",
+  "inflight": {
+    "max_tokens": 256,
+    "text": "<s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s>",
+    "finish_reason": "length",
+    "error": null,
+    "released_version": "rc-0",
+    "request_seconds": 1.7759,
+    "seconds_overlapping_cycle": 1.3752,
+    "chars_matching_baseline_prefix": 48,
+    "baseline_prefix_chars": 48
+  },
+  "cycle_seconds": 2.1486,
+  "drain_polls": 2,
+  "states_visited": [
+    "READY",
+    "DRAINING",
+    "QUIESCED",
+    "UPDATING",
+    "INVALIDATING",
+    "VALIDATING",
+    "RESUMING",
+    "READY"
+  ],
+  "after": {
+    "text": " the capital of the French Republic.\n\nThe capital of France is the capital",
+    "finish_reason": "length",
+    "weight_version": "rc-1"
+  },
+  "post_update_binding": "rc-1",
+  "engine_label_after": "rc-1",
+  "engine_paused_after": false,
+  "server_pid": 8596,
+  "server_alive": true,
+  "journal": [
+    "initialize",
+    "admit_rollout",
+    "begin_drain",
+    "finish_rollout",
+    "confirm_drained",
+    "begin_update",
+    "confirm_updated",
+    "confirm_invalidated",
+    "confirm_validated",
+    "confirm_resumed",
+    "admit_rollout",
+    "finish_rollout"
+  ],
+  "checks": {
+    "pre_update_binding_is_rc0": true,
+    "rollout_released_cleanly": true,
+    "inflight_overlapped_update": true,
+    "inflight_ran_to_length": true,
+    "inflight_used_rc0_weights": true,
+    "inflight_is_not_rc1": true,
+    "drain_outlasted_the_request": true,
+    "committed_rc1": true,
+    "post_update_binding_is_rc1": true,
+    "engine_label_rc1": true,
+    "engine_resumed": true,
+    "server_never_restarted": true
+  }
+}
