@@ -9,6 +9,7 @@ answer "is the pod's NCCL fine?" separately from "is our driver fine?".
 |---|---|
 | `upstream_nccl_2gpu.py` | vLLM's own `examples/rl/rlhf_http_nccl.py` at `00b7847c8036b667742b4efb21aab1de51fd4721`, adapted for a two-GPU pod. Proves the environment before any RolloutCore code is involved |
 | `rolloutcore_cycle_2gpu.py` | Phase 3C: the same setup, but the update runs through `LifecycleRunner.run_cycle` and the real `NCCLWeightTransferDriver` |
+| `rolloutcore_concurrency_2gpu.py` | Phase 4A: a generation spans the update, and must come out of it unchanged — the "one version per rollout" invariant, which no vLLM API enforces |
 
 ## `upstream_nccl_2gpu.py`
 
@@ -46,7 +47,40 @@ If it hangs, that is diagnostic information, not a RolloutCore bug — see
 `NCCL_DEBUG=INFO` and a finite `NCCL_TIMEOUT` so a hang fails instead of
 blocking forever.
 
-This directory is deliberately outside the lint and type-check scope
-(`scripts/test.sh` and CI check `src`, `tests` and `scripts` only): the file
-imports `torch`, `transformers`, `openai`, `requests` and `vllm`, none of which
-are installed on a development machine or in CI.
+## `rolloutcore_concurrency_2gpu.py`
+
+Same two-GPU setup as Phase 3C, but the interesting event happens *during* a
+generation: a 256-token rollout is admitted at `rc-0`, the cycle to `rc-1` starts
+while it is still generating, and the drain has to wait for it.
+
+The evidence is the text, not a log line. The server runs `--load-format dummy`,
+so its output is degenerate; the update installs real `opt-125m` weights, whose
+output is coherent and was measured in Phase 3A. A generation that *ends after*
+the update but whose 16-token prefix matches the pre-update baseline is one that
+ran entirely on the old weights.
+
+Two things about it are load-bearing, and both are explained in the file:
+
+* the rollout is released by the thread that owns its request, the moment that
+  request returns — because `confirm_drained` taints if the engine reports
+  quiescence while RolloutCore still counts live work. The engine goes idle a few
+  milliseconds before the client sees the response, which is why the runner is
+  given `drain_interval=2.0` rather than the 0.5 s default;
+* the controller is therefore called from two threads at once, which is why
+  `LifecycleController` now holds a reentrant lock
+  (`tests/test_controller_threading.py`).
+
+```bash
+pkill -f "vllm serve"; sleep 3
+python3 diagnostics/rolloutcore_concurrency_2gpu.py
+```
+
+Same rules as above. The HTTP and launch helpers are duplicated between the two
+RolloutCore scripts on purpose: each has to run standalone on a pod, and a shared
+module would also hide the `/health` probe rule that
+`tests/test_script_hygiene.py` enforces per file.
+
+This directory is deliberately outside the *type*-check scope: `scripts/test.sh`
+runs `ruff` over it, but not `mypy`, because these files import `torch`,
+`transformers`, `openai`, `requests` and `vllm`, none of which are installed on a
+development machine or in CI.

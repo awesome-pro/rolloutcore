@@ -263,7 +263,60 @@ proves the version handshake — upstream's `send_weights()` calls
 If the run goes quiet again, do not wait out the timeout: `tail -f
 results/phase3c-server.log` shows what the server is actually doing.
 
-## 7. When NCCL hangs (the expected first failure)
+## 7. Phase 4A — one version per rollout, under a live update
+
+Phase 3C proved the cycle works. Phase 4A asks the question the cycle exists for:
+**what happens to a rollout that is already generating when the weights change?**
+
+vLLM cannot answer that itself. PR #49040 added a `weight_version` query API and
+deliberately *removed* binding a version to a request, because one request may
+span two versions. So the guarantee is RolloutCore's to keep, and this is the run
+that checks it under real concurrency.
+
+```bash
+pkill -f "vllm serve"; sleep 3
+python3 diagnostics/rolloutcore_concurrency_2gpu.py
+```
+
+One 256-token generation (`ignore_eos`, so it cannot finish early) is admitted at
+`rc-0`; 0.4 s later the cycle to `rc-1` starts; the drain has to wait for it.
+
+**Why the text is the evidence.** The server runs `--load-format dummy`, so `rc-0`
+produces degenerate output. The update installs real `opt-125m` weights, whose
+output is coherent and was measured in Phase 3A. So a generation that *finishes
+after* the update, yet whose 16-token prefix matches the pre-update baseline, is
+one that ran entirely on the old weights. The two texts are impossible to confuse.
+
+```
+=== Phase 4A ===
+  [PASS] pre_update_binding_is_rc0
+  [PASS] rollout_released_cleanly
+  [PASS] inflight_overlapped_update
+  [PASS] inflight_ran_to_length
+  [PASS] inflight_used_rc0_weights
+  [PASS] inflight_is_not_rc1
+  [PASS] drain_outlasted_the_request
+  [PASS] committed_rc1
+  [PASS] post_update_binding_is_rc1
+  [PASS] engine_label_rc1
+  [PASS] engine_resumed
+  [PASS] server_never_restarted
+  rc-0 baseline : '<s><s><s>...'
+  in-flight     : '<s><s><s>...'      <- finished AFTER the update, still rc-0
+  rc-1 after    : ' the capital of the French Republic.\n\n...'
+  timing        : request 2.1s, 1.6s of it under the cycle, cycle 2.4s over 2 poll(s)
+```
+
+`inflight_used_rc0_weights` is the claim; `drain_outlasted_the_request` is why it
+held. If the drain had *not* waited, the request would have been aborted and
+`rollout_released_cleanly` / `inflight_ran_to_length` would fail instead.
+
+**If it reports a taint instead**, `DrainDisagreementError` means the engine said
+"drained" while a rollout was still counted — the release lost the race against
+the drain poll. That is the sharp edge the script documents rather than hides:
+see `docs/phase3c-results.md` and the `drain_interval` note in the script.
+
+## 8. When NCCL hangs (the expected first failure)
 
 A hang is the normal symptom, so work through this list rather than guessing:
 
@@ -278,7 +331,7 @@ A hang is the normal symptom, so work through this list rather than guessing:
 Diagnostics: `NCCL_DEBUG=INFO` (add `NCCL_DEBUG_SUBSYS=INIT,COLL` for less noise),
 and set a finite `NCCL_TIMEOUT` so a hang fails instead of blocking forever.
 
-## 8. Cost, and what to send back
+## 9. Cost, and what to send back
 
 Two A6000-class GPUs are ~$0.7/h. Step 1 (the upstream proof) is a one-hour
 session if it works first time. The driver implementation (step 2) costs **no GPU
