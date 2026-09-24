@@ -23,11 +23,13 @@ from support import IDENTITY_V0
 
 from rolloutcore import (
     AlreadyManagedEngineError,
+    DrainFailedError,
     EngineTaintedError,
     EvidenceNotReady,
     LifecycleController,
     LifecycleRunner,
     LifecycleState,
+    NotServingError,
     RolloutCoreError,
     VersionMismatchError,
     WeightTransferNotConfiguredError,
@@ -450,6 +452,64 @@ class TestFailurePaths(unittest.TestCase):
             result = runner.install_next(manifest_identity(f"v{n}"))
             self.assertEqual(result.committed.version, WeightVersion(n))
         self.assertIs(ctrl.state, LifecycleState.READY)
+
+
+class TestDeadEngineDuringDrain(unittest.TestCase):
+    """Phase 4B, on the fake engine: a drain failure is not a taint.
+
+    The runner calls `await_drain` through `_observe`, which deliberately does not
+    taint a failed read. Measured against a real SIGKILLed engine, the consequence
+    is that the controller is left in DRAINING, untainted, with no legal exit --
+    `CONFIRM_DRAINED` is the only transition out of DRAINING and a dead engine can
+    never supply it. Only an operator `taint()` ends it.
+
+    That is safe (DRAINING admits no rollouts and nothing was published) but it is
+    not self-healing, so the behaviour is pinned here rather than left implicit.
+    """
+
+    def test_a_dead_engine_leaves_the_controller_in_draining_untainted(self):
+        engine = seeded_engine(IDENTITY_V0)
+
+        class DeadEngineAdapter(FakeVLLMAdapter):
+            def await_drain(self):
+                raise DrainFailedError(3, "transport error: [Errno 111] Connection refused")
+
+        runner, ctrl, adapter = make_runner(
+            engine, adapter=DeadEngineAdapter(engine), drain_polls=3
+        )
+        runner.bootstrap()
+        target = ctrl.next_target(manifest_identity("v1"))
+
+        with self.assertRaises(DrainFailedError):
+            runner.run_cycle(target)
+
+        # Not tainted: a failed read left nothing ambiguous, and nothing was
+        # written. Fail-closed via DRAINING, not via TAINTED.
+        self.assertFalse(ctrl.is_tainted)
+        self.assertIs(ctrl.state, LifecycleState.DRAINING)
+        # No version was published and no rollout can be admitted.
+        self.assertEqual(ctrl.current_version, WeightVersion(0))
+        with self.assertRaises(NotServingError):
+            ctrl.admit_rollout("R1")
+        # And DRAINING really has one exit, so the operator has to decide.
+        self.assertEqual(adapter.engine.weight_version, "rc-0")
+
+    def test_an_operator_taint_is_the_way_out(self):
+        engine = seeded_engine(IDENTITY_V0)
+
+        class DeadEngineAdapter(FakeVLLMAdapter):
+            def await_drain(self):
+                raise DrainFailedError(3, "transport error: [Errno 111] Connection refused")
+
+        runner, ctrl, _ = make_runner(engine, adapter=DeadEngineAdapter(engine), drain_polls=3)
+        runner.bootstrap()
+        with self.assertRaises(DrainFailedError):
+            runner.run_cycle(ctrl.next_target(manifest_identity("v1")))
+
+        ctrl.taint("engine unreachable: no drain evidence is coming")
+        self.assertTrue(ctrl.is_tainted)
+        self.assertIn("engine unreachable", str(ctrl.taint_reason))
+        self.assertIs(ctrl.state, LifecycleState.TAINTED)
 
 
 class TestRunnerGuards(unittest.TestCase):

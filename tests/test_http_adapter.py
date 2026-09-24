@@ -433,7 +433,11 @@ class TestDrain(unittest.TestCase):
             ad.await_drain()  # budget exhausted
 
         self.assertEqual(ctx.exception.attempts, 3)
-        self.assertIn("remains paused", str(ctx.exception))
+        # The message must not claim the engine is paused: with a transport error
+        # its pause state is exactly what is unconfirmed (Phase 4B: a SIGKILLed
+        # engine produced "Connection refused" here, not a timeout).
+        self.assertIn("pause state is therefore unconfirmed", str(ctx.exception))
+        self.assertNotIn("remains paused", str(ctx.exception))
         self.assertEqual(t.count("/pause"), 3)
 
     def test_transient_transport_error_is_retried(self):

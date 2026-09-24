@@ -27,6 +27,10 @@ weight source that produced it.
 > came out of it on the version it was admitted to — 12/12 checks, so "one version
 > per rollout" now holds under real concurrency, not just by construction —
 > `docs/phase4a-results.md`, `results/phase4a.json`.
+> **Phase 4B passed** (2026-09-24): the failure paths against a real engine —
+> a recoverable drain failure, an identity mismatch that fails before any
+> mutation, a SIGKILLed engine that taints, and recovery by restart. 21/21 checks
+> over three engine lifetimes — `docs/phase4b-results.md`, `results/phase4b.json`.
 
 ---
 
@@ -82,6 +86,7 @@ runner.install_next(manifest_identity("B"))        # -> READY at rc-1
 | `docs/phase3b-runbook.md` | **Runbook** — what NCCL is, the two-GPU pod, proving upstream's path first, and the NCCL hang checklist |
 | `docs/phase3c-results.md` | **Results** — the first real cycle end to end on two GPUs, and the identity limit it exposed |
 | `docs/phase4a-results.md` | **Results** — one version per rollout under a live update: a generation spans the update and stays on its version |
+| `docs/phase4b-results.md` | **Results** — the failure paths against a real engine, and the two places a correctly-detected failure has nowhere to go |
 | `docs/plan-delta.md` | Original plan vs. source-map findings vs. implementation amendments |
 | `source-map-vllm-main.md` | Source-level map of vLLM `main`: 9 subsystems, every claim anchored to `file:LINE`, plus an RFC cross-check |
 | `mvp-plan.md` | The minimal real-vLLM cycle: exact HTTP call sequence, integration surface, guardrails |

@@ -125,14 +125,21 @@ class WeightTransferNotConfiguredError(RolloutCoreError):
 class DrainFailedError(RolloutCoreError):
     """The drain could not be driven to completion within the retry budget.
 
-    Retryable in principle -- the engine was paused (``PAUSED_NEW`` is set
-    before the drain waits, ``vllm/v1/engine/core.py:1984-2026``), so no new work
-    can be admitted and nothing was published -- but RolloutCore stops polling
-    rather than spinning against an attempt that is not progressing.
+    Fail-closed in every case that produces it, but for a reason that has to be
+    stated carefully. When the pause was accepted, ``PAUSED_NEW`` is set before
+    the wait begins (``vllm/v1/engine/core.py:1984-2026``), so new work is refused
+    even though the drain never completed. When the engine could not be reached at
+    all -- Phase 4B measured this by SIGKILLing one -- there is no pause state to
+    speak of, and the guarantee comes from elsewhere: DRAINING admits no rollouts,
+    and no version was published. Either way nothing can be served and nothing was
+    written.
 
-    Not a taint: the engine's pause state is known, and it is not serving new
-    requests. The controller stays in DRAINING, which is fail-closed because
-    DRAINING cannot admit rollouts.
+    Not a taint: taint is for ambiguous *mutations*, and a failed drain writes
+    nothing. The cost of that choice is worth knowing. DRAINING has exactly one
+    exit, ``CONFIRM_DRAINED`` (``lifecycle.py:130``), so an engine that never comes
+    back leaves the controller sitting in DRAINING, untainted, until an operator
+    calls :meth:`~rolloutcore.LifecycleController.taint` -- which is precisely the
+    state Phase 4B's dead-engine run recorded.
     """
 
     def __init__(self, attempts: int, last_error: str | None) -> None:
@@ -142,8 +149,9 @@ class DrainFailedError(RolloutCoreError):
         if last_error:
             detail = f"{detail}; last error: {last_error}"
         super().__init__(
-            f"drain did not complete{detail}. The engine remains paused; "
-            "resuming is an operator decision."
+            f"drain did not complete{detail}. The engine's pause state is therefore "
+            "unconfirmed, and DRAINING admits no rollouts, so nothing can be "
+            "published. Re-draining, or an operator taint, is the next decision."
         )
 
 
