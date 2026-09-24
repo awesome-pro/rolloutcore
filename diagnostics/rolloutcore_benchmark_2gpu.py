@@ -338,7 +338,11 @@ class StateTimeline:
 
 
 def build_engine(
-    train_model: Any, model: str, *, packed_buffer_bytes: int | None = None
+    train_model: Any,
+    model: str,
+    *,
+    packed_buffer_bytes: int | None = None,
+    packed_num_buffers: int | None = None,
 ) -> tuple[Any, HttpVLLMAdapter, LifecycleController, LifecycleRunner]:
     group_size = world_size() + 1  # every inference worker, plus this trainer
     init_info: dict[str, Any] = {
@@ -354,6 +358,11 @@ def build_engine(
         # *should* agree -- but a divergence deadlocks an NCCL collective instead of
         # erroring, so this is a hypothesis to test cheaply, not debug in place.
         init_info["packed_buffer_size_bytes"] = packed_buffer_bytes
+    if packed_num_buffers is not None:
+        # Receive buffers are allocated per chunk on the worker and nothing
+        # reserves room for them, so halving their number is the cheapest way to
+        # buy headroom on a card that is already full of weights.
+        init_info["packed_num_buffers"] = packed_num_buffers
     driver = NCCLWeightTransferDriver(
         base_url=BASE_URL,
         trainer_init_info=NCCLTrainerInitInfo(**init_info),
@@ -382,6 +391,12 @@ def main() -> int:
         help="override NCCLTrainerInitInfo.packed_buffer_size_bytes (default 1GiB)",
     )
     ap.add_argument(
+        "--packed-num-buffers",
+        type=int,
+        default=None,
+        help="override NCCLTrainerInitInfo.packed_num_buffers (vLLM default 2)",
+    )
+    ap.add_argument(
         "--gpu-memory-utilization",
         type=float,
         default=0.6,
@@ -402,6 +417,7 @@ def main() -> int:
     args = ap.parse_args()
     model = args.model
     packed_bytes = None if args.packed_buffer_gib is None else int(args.packed_buffer_gib * 1024**3)
+    packed_buffers = args.packed_num_buffers
     # A cap above the checkpoint's own context is a hard error in vLLM, not a
     # warning: "User-specified max_model_len (4096) is greater than the derived
     # max_model_len (max_position_embeddings=2048...)". opt-125m is 2048, so a
@@ -420,6 +436,7 @@ def main() -> int:
     report["flags"] = {
         "model": model,
         "packed_buffer_bytes": packed_bytes,
+        "packed_num_buffers": packed_buffers,
         "transfer_budget_seconds": args.transfer_budget,
         "drain_interval_seconds": DRAIN_INTERVAL_S,
         "gpu_memory_utilization": args.gpu_memory_utilization,
@@ -462,7 +479,10 @@ def main() -> int:
         train_model.to(f"cuda:{TRAINER_DEVICE_INDEX}")
 
         driver, _adapter, ctrl, runner = build_engine(
-            train_model, model, packed_buffer_bytes=packed_bytes
+            train_model,
+            model,
+            packed_buffer_bytes=packed_bytes,
+            packed_num_buffers=packed_buffers,
         )
         identity = driver.identity()
         print("[cycle] bootstrap")
@@ -574,7 +594,10 @@ def main() -> int:
             print("\n--- L3: SIGKILL inside the collective ---")
             server = lifetime("l3-deep-kill", dummy=True)
             _d3, _a3, ctrl3, runner3 = build_engine(
-                train_model, model, packed_buffer_bytes=packed_bytes
+                train_model,
+                model,
+                packed_buffer_bytes=packed_bytes,
+                packed_num_buffers=packed_buffers,
             )
             runner3.bootstrap()
             identity3 = _d3.identity()
