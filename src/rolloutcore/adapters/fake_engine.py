@@ -9,7 +9,7 @@ Enough fidelity to exercise the real cycle without a GPU:
 * ``pause(mode="wait")`` refuses to complete while requests are active -- the
   drain proof. ``mode="keep"`` is modelled too, so tests can show why it is
   unusable.
-* ``finish_weight_update`` writes the version but invalidates **nothing**,
+* ``finish_weight_update`` writes the version but invalidates **no cache**,
   mirroring ``AsyncLLM.finish_weight_update``
   (``vllm/v1/engine/async_llm.py:1284-1288``) and ``Worker.finish_weight_update``
   (``vllm/v1/worker/gpu_worker.py:1488-1505``).

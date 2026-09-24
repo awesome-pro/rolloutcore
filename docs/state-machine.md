@@ -1,9 +1,10 @@
 # RolloutCore lifecycle state machine — design
 
-**Phase 1 + Phase 2 (fake-engine cycle).** Pure Python, no vLLM import in the
+**Design for Phases 1 and 2 (fake-engine cycle)**, and still the description of
+the controller as it stands through Phase 6. Pure Python, no vLLM import in the
 controller, no GPU.
 
-Source: `src/rolloutcore/` · Tests: `tests/` (234 tests)
+Source: `src/rolloutcore/` · Tests: `tests/` (326 tests)
 Run: `./scripts/test.sh` (no dependencies; also runs ruff + mypy when present)
 
 ---
@@ -202,7 +203,7 @@ rollouts either.
 The original plan allowed *"safely restore `READY(N)`"* as an alternative to
 failing. vLLM provides no way to verify that:
 
-- `finish_weight_update` reports no per-tensor outcome and invalidates nothing
+- `finish_weight_update` reports no per-tensor outcome and invalidates no cache
   (`vllm/v1/worker/gpu_worker.py:1488-1505`);
 - the engine's label is written *before* caches are touched, so it is not a
   commit marker (demonstrated in `demo.py` scenario 4);
@@ -408,7 +409,7 @@ behaviours the design depends on, each traced to its vLLM source.
 | `weight_version` starts as the literal `"default"` and is never auto-incremented | bootstrap must seed `rc-0` | `core.py:137`, `:1043` |
 | `pause(mode="wait")` sets `PAUSED_NEW` **first**, then reports "not complete" while requests are active | a still-running drain is `EvidenceNotReady`, and the engine is already blocking new work | `core.py:2017-2018` |
 | `pause(clear_cache=True)` cleans all three caches | INVALIDATING is a re-assertion, not the only defence | `core.py:877-882` → `:861-875` |
-| `finish_weight_update` writes the version but invalidates **nothing** | the engine label is not a commit marker | `async_llm.py:1284-1288`; `gpu_worker.py:1488-1505` |
+| `finish_weight_update` writes the version but invalidates **no cache** | the engine label is not a commit marker | `async_llm.py:1284-1288`; `gpu_worker.py:1488-1505` |
 | `finish_weight_update` failure leaves the label unwritten | the label is written only *after* the RPC returns | `async_llm.py:1284-1288` |
 | `reset_prefix_cache` can return `false` while blocks are held | a 200 is not success | `block_pool.py:831-838` |
 
@@ -423,11 +424,16 @@ behaviours the design depends on, each traced to its vLLM source.
 | `test_invariants.py` | 52 | I1–I10, taint forensics, the plan's §13 mixed-version experiment |
 | `test_evidence.py` | 35 | every `failure_reason` branch of all six evidence types, driver consistency, immutability |
 | `test_versions.py` | 45 | label round-trip, ordering, `WeightIdentity` canonicity, both identity tiers, `cache_salt` constraint |
-| `test_cycle.py` | 23 | **Phase 2**: full cycle over the fake engine, pause ordering, drain polling, pre-write bootstrap refusal, effect-vs-observation failure classification |
+| `test_cycle.py` | 25 | **Phase 2**: full cycle over the fake engine, pause ordering, drain polling, pre-write bootstrap refusal, effect-vs-observation failure classification, a dead engine during a drain |
 | `test_http_adapter.py` | 39 | call sequences, query params, real vs. fabricated payloads, managed-engine refusal, drain reissue/budget, stub-driver round trip, port conformance |
 | `test_live_smoke.py` | 8 | the Phase 3A harness against `tests/fake_dev_server.py`: full pass, drain really waited, post-resume drift caught, warm-server refusal, in-process `mode=wait` rejection, and zero weight-transfer calls |
+| `test_nccl_driver.py` | 26 | the real driver's identity/declare seam, the transfer round trip against a fake engine, and the pure `device_mismatch` rule (no GPU, no torch) |
+| `test_trajectory.py` | 20 | `Trajectory`/`TrajectoryRecorder`: provenance, `replay_ready`, admission agreement, JSONL round trip, logprob shape, and the committed Phase 5 artifact |
+| `test_replay.py` | 35 | the item 8 validator: protocol violations, token and logprob lanes, tolerance, the greedy/trace-forced modes, and the CLI end to end |
+| `test_controller_threading.py` | 4 | the reentrant controller lock, and the duplicate-sequence failure that removing it produces |
+| `test_script_hygiene.py` | 5 | the rules the GPU harnesses must not break: status-only `/health` probes, `os.killpg` only with `start_new_session=True` |
 
-234 tests. `ruff check`, `ruff format --check` and `mypy --strict` all pass on
+326 tests. `ruff check`, `ruff format --check` and `mypy --strict` all pass on
 the package; CI runs them on Python 3.11/3.12/3.13. The frozen-evidence
 immutability test asserts on a real dataclass *field* rather than a
 monkey-patched method, because on 3.11/3.12 the non-field path in a

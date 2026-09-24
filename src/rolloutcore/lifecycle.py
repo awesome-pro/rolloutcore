@@ -513,7 +513,7 @@ class LifecycleController:
 
         Maps to ``POST /finish_weight_update {"weight_version": "<target>"}``.
 
-        The engine's ``finish_weight_update`` RPC invalidates **nothing**
+        The engine's ``finish_weight_update`` RPC invalidates **no cache**
         (``gpu_worker.py:1488-1505``), which is why this transition leads to
         INVALIDATING rather than back to READY.
         """

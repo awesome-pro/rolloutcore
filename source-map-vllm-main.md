@@ -18,7 +18,7 @@ Every claim carries a `path:LINE` anchor plus the owning class/function. Anythin
 | 2 | `weight_version` is an **opaque caller-supplied string**, initialised to the literal `"default"`. | `vllm/v1/engine/core.py:137` |
 | 3 | `weight_version` is **never attached** to `Request`, `EngineCoreRequest`, `EngineCoreOutput`, `CompletionOutput` or `RequestOutput`. | §2.4 |
 | 4 | It is **never auto-incremented**; the only mutation is a verbatim assignment. | `core.py:1043` |
-| 5 | `finish_weight_update` invalidates **nothing**. Worker-side cleanup is only `reset_lora_state()`. | `async_llm.py:1284-1288`; `gpu_worker.py:1488-1505` |
+| 5 | `finish_weight_update` invalidates **no cache**. Its only worker-side cleanup is `reset_lora_state()`, which clears LoRA adapters when one is configured. | `async_llm.py:1284-1288`; `gpu_worker.py:1488-1505` |
 | 6 | Prefix-cache keys contain **no weight generation**. Extra keys are only LoRA *name*, MM hashes, `cache_salt`, prompt-embed hashes. | `kv_cache_utils.py:610-646` |
 | 7 | `cache_salt` is the **only caller-controllable identity input** to the cache key — and it **is** exposed on the OpenAI API. | `kv_cache_utils.py:632-634`; `chat_completion/protocol.py:456` |
 | 8 | `pause(mode="wait")` **is** a true drain and **does** clear prefix/MM/encoder caches when `clear_cache=True`. | `core.py:877-882`, `:1984-2026` |
@@ -265,7 +265,7 @@ if weight_version is not None:
 
 **A plain `"rdt"` backend does NOT exist on main@00b7847c** — only `sharded_rdt`. `RdtRouter` (`sharded_rdt_common.py:102`) is a routing helper, not an engine.
 
-Factories: `WeightTransferEngineFactory.create_engine()` `factory.py:85-121` (unknown backend → `ValueError` `:110-113`); `WeightTransferTrainerFactory.trainer_init()` `:167-215` (dispatches on `init_info.backend` `:197-204`). Both extensible at runtime via `register_engine(name, cls)` `:41-82` / `:137-164`. Re-exports `__init__.py:19-22`.
+Factories: `WeightTransferEngineFactory.create_engine()` `factory.py:85-121` (unknown backend → `ValueError` `:110-113`); `WeightTransferTrainerFactory.trainer_init()` `:167-215` (dispatches on `init_info.backend` `:197-204`). Both extensible at runtime via `register_engine(name, cls)` `:41-82` / `:137-164`. Re-exports `vllm/distributed/weight_transfer/__init__.py:19-22`.
 
 Per-backend notes:
 
@@ -501,7 +501,7 @@ extra_keys = lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_k
 
 ### 5.5 `#48762` — the encoder-cache fix that did **not** land
 
-`vllm-project/vllm#48762` — *"[Bugfix][V1] Invalidate encoder cache on finish_weight_update"* — GitHub state `closed`, `merged_at: null`, closed 2026-07-17. Consistent with the code: `finish_weight_update` still invalidates nothing. RFC #48312 lists this as an exit criterion (*"#48762 or an equivalent non-reverted fix lands"*).
+`vllm-project/vllm#48762` — *"[Bugfix][V1] Invalidate encoder cache on finish_weight_update"* — GitHub state `closed`, `merged_at: null`, closed 2026-07-17. Consistent with the code: `finish_weight_update` still invalidates no KV, encoder or multimodal cache (its only cleanup is `reset_lora_state()`). RFC #48312 lists this as an exit criterion (*"#48762 or an equivalent non-reverted fix lands"*).
 
 ---
 
@@ -701,7 +701,7 @@ Related examples elsewhere: `examples/features/pause_resume/pause_resume_offline
 
 **RLHF dev endpoints** — `tests/entrypoints/serve/dev/rlhf/` contains only `conftest.py` + `state_transitions/test_pause_resume.py`.
 - `conftest.py`: DEV_MODE gate `:96`; base args include `--enable-sleep-mode` (`:42`/`:58`); helpers `poll_until:146`, `gen:176`, `gen_with_logprobs:194`, `stream_completion:243`, `start_stream:276`, `pause:304`, `resume:312`, `completion_with_cache_details:316`, `golden_output:332`, `cached_tokens:344`, `sleep:353`, `wake:359`, `is_sleeping:364`, `is_paused:368`, `health:372`, `start_weight_update:384`, `finish_weight_update:392`, `get_world_size:396`, `gpu_free_bytes:409`, `sleep_metrics:422`.
-- **Only `/pause`, `/resume`, `/is_paused`, `/v1/completions`, `/health` are actually called** by test code. `sleep`/`wake`/`is_sleeping`/`start_weight_update`/`finish_weight_update`/`get_world_size`/`sleep_metrics`/`gpu_free_bytes`/`poll_until` have **zero callers**.
+- **Only `/pause`, `/resume`, `/is_paused`, `/v1/completions`, `/health` are actually called** by test code. `sleep`/`wake`/`is_sleeping`/`start_weight_update`/`finish_weight_update`/`get_world_size`/`sleep_metrics`/`gpu_free_bytes`/`poll_until` have **no importers** -- checked by import, because a bare-name grep is false here (`sleep` and `get_world_size` name unrelated functions elsewhere in the tree).
 - `state_transitions/test_pause_resume.py` (168 L): parametrized MRV1/MRV2 (`:27-35`); `TestPauseResume:57`; `test_state_and_idempotency_across_cycles:58` (abort/wait/keep `:66`); `test_invalid_mode_preserves_state:75` (400 + `error.param == "query.mode"` `:86-87`); **`test_mode_request_lifecycle:100`** — the reference oracle for drain semantics (abort/wait ⇒ in-flight finished `:120-121`; keep ⇒ no new chunks until resume `:122-127`; new request must not complete while paused `:129-132`); `test_clear_cache_preserves_output_and_controls_prefix_cache:145` (cached_tokens 0 → >0 → preserved → 0, `:155-168`).
 
 **Sleep / wake**
@@ -842,7 +842,7 @@ Consistent with RFC #48311 / #48305 listing the "RL CI matrix" (`#45585`) as an 
 | #48305 §3.3 | DSA index replay (#47280/#47279) | **NOT PRESENT** — no `enable_return_indexer_topk` |
 | #48305 §3.4 | Artifact transfer connector (#47809) | **Not merged** (`closed`, `merged_at: null`) |
 | #48305 §3.6 | Dtype replay (#48390) | **Merged** 2026-07-13 |
-| **#48312** | Cat. 7: "#48762 or an equivalent non-reverted fix lands" | **Not landed** — `#48762` closed unmerged; `finish_weight_update` still invalidates nothing |
+| **#48312** | Cat. 7: "#48762 or an equivalent non-reverted fix lands" | **Not landed** — `#48762` closed unmerged; `finish_weight_update` still invalidates no cache |
 | #48312 | Cat. 1 fixes #48251 / #46009 / #41670 / #48438 / #48539 | Several still open per exit criteria; `#48478` production registry still **open** |
 | #48312 | Composite lane `pause/drain → sleep → wake(weights) → update → post-load → wake(kv) → invalidate → resume` | **Not present in CI.** Closest in-tree test is `test_pause_resume.py` (pause/resume only, no weight update) |
 | #48312 | Queryable generation identity / read-your-writes | **Not present** — `GET /weight_info` returns the last value *set*; no commit certificate |
