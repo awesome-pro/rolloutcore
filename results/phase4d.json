@@ -1,0 +1,41 @@
+{
+  "phase": "4D",
+  "model": "facebook/opt-125m",
+  "ok": true,
+  "started_at": "2026-09-24T16:40:33+00:00",
+  "rolloutcore_sha": "1d60230a6abb75577ac24be1be05cb216f154b4f",
+  "rolloutcore_dirty": false,
+  "vllm_version": "0.30.1rc1.dev60+g00b7847c8",
+  "healthy_cycle_seconds": 2.1192,
+  "detail": {
+    "kill": {
+      "state_at_kill": "UPDATING",
+      "seconds_from_cycle_start_to_kill": 2.0039,
+      "healthy_cycle_seconds": 2.1192,
+      "arm_timed_out": false
+    },
+    "detection": {
+      "hung": false,
+      "seconds_from_kill": 0.1767,
+      "budget_seconds": 120.0,
+      "outcome": "EngineTaintedError: engine tainted in state UPDATING: complete_weight_update failed with an unknown engine outcome: ConnectionError(ProtocolError('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))). TAINTED is terminal in V1: restart the engine and construct a new controller."
+    },
+    "controller": {
+      "state": "TAINTED",
+      "tainted": true,
+      "taint_reason": "complete_weight_update failed with an unknown engine outcome: ConnectionError(ProtocolError('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer')))",
+      "serving": false,
+      "committed": "rc-1"
+    }
+  },
+  "checks": {
+    "baseline_cycle_committed_rc1": true,
+    "engine_served_before_the_kill": true,
+    "engine_is_dead": true,
+    "no_version_was_published": true,
+    "no_rollout_can_be_admitted": true,
+    "update_did_not_report_success": true,
+    "outcome_is_recorded": true,
+    "update_failure_detected_within_budget": true
+  }
+}
