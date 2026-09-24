@@ -1,0 +1,110 @@
+{
+  "phase": "6",
+  "model": "facebook/opt-125m",
+  "ok": true,
+  "flags": {
+    "model": "facebook/opt-125m",
+    "packed_buffer_bytes": null,
+    "packed_num_buffers": null,
+    "transfer_budget_seconds": 180.0,
+    "drain_interval_seconds": 0.1,
+    "gpu_memory_utilization": 0.6,
+    "max_model_len_requested": 4096,
+    "max_model_len_effective": 2048,
+    "model_max_position_embeddings": 2048
+  },
+  "started_at": "2026-09-24T18:06:24+00:00",
+  "rolloutcore_sha": "c197b8bad8537e210e79eaeddf88f6a54bcfa7e1",
+  "rolloutcore_dirty": false,
+  "vllm_version": "0.30.1rc1.dev60+g00b7847c8",
+  "states_visited": [
+    "READY",
+    "DRAINING",
+    "QUIESCED",
+    "UPDATING",
+    "INVALIDATING",
+    "VALIDATING",
+    "RESUMING",
+    "READY"
+  ],
+  "detail": {
+    "hot": {
+      "seconds": 0.2299,
+      "timeline_seconds": 0.2304,
+      "states": {
+        "READY": 0.0204,
+        "DRAINING": 0.1005,
+        "UPDATING": 0.1008,
+        "VALIDATING": 0.0087
+      },
+      "events": [
+        [
+          "READY",
+          -0.0003
+        ],
+        [
+          "DRAINING",
+          0.0201
+        ],
+        [
+          "UPDATING",
+          0.1206
+        ],
+        [
+          "VALIDATING",
+          0.2214
+        ],
+        [
+          "READY",
+          0.23
+        ]
+      ],
+      "before": "<s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s>",
+      "after": " the capital of the French Republic.\n\nThe capital of France is the capital",
+      "committed": "rc-1",
+      "engine_label": "rc-1",
+      "update_phase_seconds": 0.1008
+    },
+    "restart": {
+      "kill_to_ready_seconds": 30.0317,
+      "kill_to_first_token_seconds": 30.3501,
+      "text": " the capital of the French Republic.\n\nThe capital of France is the capital",
+      "note": "generous to the baseline: the checkpoint is already on disk, so the checkpoint write a real restart-based update needs is not counted"
+    },
+    "deep_kill": {
+      "state_at_kill": "UPDATING",
+      "reached_updating": true,
+      "aimed_at_seconds": 0.0504,
+      "killed_after_seconds": 0.1537,
+      "hung": false,
+      "seconds_to_outcome": 0.1738,
+      "outcome": "EngineTaintedError: engine tainted in state UPDATING: complete_weight_update failed with an unknown engine outcome: ConnectionError(ProtocolError('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))). TAINTED is terminal in V1: restart the engine and construct a new controller.",
+      "budget_seconds": 120.0
+    },
+    "deep_kill_controller": {
+      "state": "TAINTED",
+      "tainted": true,
+      "taint_reason": "complete_weight_update failed with an unknown engine outcome: ConnectionError(ProtocolError('Connection aborted.', RemoteDisconnected('Remote end closed connection without response')))"
+    },
+    "comparison": {
+      "hot_seconds": 0.2299,
+      "restart_kill_to_ready_seconds": 30.0317,
+      "restart_kill_to_serving_seconds": 30.3501,
+      "speedup_vs_ready": 130.63,
+      "speedup_vs_serving": 132.01
+    }
+  },
+  "checks": {
+    "hot_path_committed_rc1": true,
+    "hot_path_changed_the_output": true,
+    "timeline_saw_the_update": true,
+    "restart_served": true,
+    "restart_cost_is_measurable": true,
+    "hot_path_is_faster_than_a_restart": true,
+    "deep_kill_landed_during_the_update": true,
+    "deep_kill_no_version_published": true,
+    "deep_kill_engine_is_dead": true,
+    "deep_kill_outcome_is_recorded": true,
+    "deep_kill_detected_within_budget": true
+  }
+}
