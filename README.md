@@ -15,10 +15,11 @@ weight source that produced it.
 > state machine, the typed adapter port, a stdlib HTTP adapter for the lifecycle
 > **control plane**, and a full `READY → … → READY` cycle against an in-memory
 > fake engine. Real weight transfer (NCCL) is **not** implemented, and real-GPU
-> work has started: **Phase 3A** is a real-vLLM control-plane smoke
-> (`scripts/live_control_plane_smoke.py`), ready to run on a one-GPU pod — see
-> `docs/phase3a-runbook.md`. Do not point this at a GPU expecting a hot weight
-> update: NCCL weight transfer is Phase 3B (`docs/phase3b-notes.md`).
+> **Phase 3A passed on real hardware** (2026-09-24): 16/16 checks against a real
+> `vllm serve` at the audited commit, on one A6000 — see
+> `docs/phase3a-results.md`. Real *weight replacement* is still not implemented:
+> NCCL transfer is Phase 3B (`docs/phase3b-notes.md`). Do not point this at a GPU
+> expecting a hot weight update yet.
 
 ---
 
@@ -68,8 +69,10 @@ runner.install_next(manifest_identity("B"))        # -> READY at rc-1
 |---|---|
 | `PROJECT.md` | Project brief: why it exists, invariants, roadmap, upstream-contribution policy |
 | `docs/state-machine.md` | **Design** — states, transitions, failure policy, adapter port, fake-engine fidelity |
+| `docs/phase3a-results.md` | **Results** — the real-GPU Phase 3A run: environment, measurements, what it proves and does not |
 | `docs/phase3a-runbook.md` | **Runbook** — one-GPU pod setup, the exact commands, checkpoints, pass/fail criteria, troubleshooting |
-| `docs/phase3b-notes.md` | Phase 3B plan — the target-aware weight-sync client and the `finish_weight_update` version gap |
+| `docs/phase3b-notes.md` | Phase 3B design — the target-aware weight-sync client and the `finish_weight_update` version gap |
+| `docs/phase3b-runbook.md` | **Runbook** — what NCCL is, the two-GPU pod, proving upstream's path first, and the NCCL hang checklist |
 | `docs/plan-delta.md` | Original plan vs. source-map findings vs. implementation amendments |
 | `source-map-vllm-main.md` | Source-level map of vLLM `main`: 9 subsystems, every claim anchored to `file:LINE`, plus an RFC cross-check |
 | `mvp-plan.md` | The minimal real-vLLM cycle: exact HTTP call sequence, integration surface, guardrails |
@@ -118,7 +121,7 @@ real GitHub tip, not a local fork:
 The sibling checkout `vendor/vllm` is a stale fork (`d90f0eade5`) and was not
 used. The worktree is a shallow clone (depth 1), so **"NOT PRESENT" means absent
 at this commit, not never existed**. `scripts/verify_anchors.py` re-derives every
-backticked `file.py:LINE` claim from the checkout: **407 anchors resolve to real
+backticked `file.py:LINE` claim from the checkout: **413 anchors resolve to real
 files with in-range line numbers, 0 unresolved** (134 of them via a basename that
 appears in several directories, so the line was checked against each candidate).
 

@@ -10,4 +10,6 @@ htmlcov/
 dist/
 build/
 *.egg-info/
-results/
+results/*
+!results/phase3a.json
+!results/*.md
