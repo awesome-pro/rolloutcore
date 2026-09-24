@@ -1,0 +1,110 @@
+{
+  "phase": "6",
+  "model": "Qwen/Qwen3-8B",
+  "ok": false,
+  "flags": {
+    "model": "Qwen/Qwen3-8B",
+    "packed_buffer_bytes": null,
+    "packed_num_buffers": 1,
+    "transfer_budget_seconds": 180.0,
+    "drain_interval_seconds": 0.1,
+    "gpu_memory_utilization": 0.75,
+    "max_model_len_requested": 4096,
+    "max_model_len_effective": 4096,
+    "model_max_position_embeddings": 40960
+  },
+  "started_at": "2026-09-24T18:09:52+00:00",
+  "rolloutcore_sha": "c197b8bad8537e210e79eaeddf88f6a54bcfa7e1",
+  "rolloutcore_dirty": false,
+  "vllm_version": "0.30.1rc1.dev60+g00b7847c8",
+  "states_visited": [
+    "READY",
+    "DRAINING",
+    "QUIESCED",
+    "UPDATING",
+    "INVALIDATING",
+    "VALIDATING",
+    "RESUMING",
+    "READY"
+  ],
+  "detail": {
+    "hot": {
+      "seconds": 4.2556,
+      "timeline_seconds": 4.2565,
+      "states": {
+        "READY": 0.0207,
+        "DRAINING": 0.1006,
+        "UPDATING": 4.1264,
+        "VALIDATING": 0.0088
+      },
+      "events": [
+        [
+          "READY",
+          -0.0006
+        ],
+        [
+          "DRAINING",
+          0.0201
+        ],
+        [
+          "UPDATING",
+          0.1207
+        ],
+        [
+          "VALIDATING",
+          4.2471
+        ],
+        [
+          "READY",
+          4.2559
+        ]
+      ],
+      "before": "\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is",
+      "after": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid.",
+      "committed": "rc-1",
+      "engine_label": "rc-1",
+      "update_phase_seconds": 4.1264
+    },
+    "restart": {
+      "kill_to_ready_seconds": 37.0487,
+      "kill_to_first_token_seconds": 37.5621,
+      "text": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid.",
+      "note": "generous to the baseline: the checkpoint is already on disk, so the checkpoint write a real restart-based update needs is not counted"
+    },
+    "deep_kill": {
+      "state_at_kill": "UPDATING",
+      "reached_updating": true,
+      "aimed_at_seconds": 2.0632,
+      "killed_after_seconds": 2.1743,
+      "hung": true,
+      "seconds_to_outcome": 120.2254,
+      "outcome": null,
+      "budget_seconds": 120.0
+    },
+    "deep_kill_controller": {
+      "state": "UPDATING",
+      "tainted": false,
+      "taint_reason": null
+    },
+    "comparison": {
+      "hot_seconds": 4.2556,
+      "restart_kill_to_ready_seconds": 37.0487,
+      "restart_kill_to_serving_seconds": 37.5621,
+      "speedup_vs_ready": 8.71,
+      "speedup_vs_serving": 8.83
+    }
+  },
+  "checks": {
+    "hot_path_committed_rc1": true,
+    "hot_path_changed_the_output": true,
+    "timeline_saw_the_update": true,
+    "restart_served": true,
+    "restart_cost_is_measurable": true,
+    "hot_path_is_faster_than_a_restart": true,
+    "deep_kill_landed_during_the_update": true,
+    "deep_kill_no_version_published": true,
+    "deep_kill_engine_is_dead": true,
+    "deep_kill_outcome_is_recorded": true,
+    "deep_kill_detected_within_budget": false
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "phase": "6",
+  "model": "Qwen/Qwen3-8B",
+  "ok": true,
+  "flags": {
+    "model": "Qwen/Qwen3-8B",
+    "packed_buffer_bytes": null,
+    "packed_num_buffers": 1,
+    "transfer_budget_seconds": 180.0,
+    "drain_interval_seconds": 0.1,
+    "gpu_memory_utilization": 0.75,
+    "max_model_len_requested": 4096,
+    "max_model_len_effective": 4096,
+    "model_max_position_embeddings": 40960
+  },
+  "started_at": "2026-09-24T18:25:23+00:00",
+  "rolloutcore_sha": "e1a82b09207d37233200ce08e0055e091f2f43b7",
+  "rolloutcore_dirty": false,
+  "vllm_version": "0.30.1rc1.dev60+g00b7847c8",
+  "states_visited": [
+    "READY",
+    "DRAINING",
+    "QUIESCED",
+    "UPDATING",
+    "INVALIDATING",
+    "VALIDATING",
+    "RESUMING",
+    "READY"
+  ],
+  "detail": {
+    "hot": {
+      "seconds": 4.2544,
+      "timeline_seconds": 4.2551,
+      "states": {
+        "READY": 0.0206,
+        "DRAINING": 0.1007,
+        "UPDATING": 4.1287,
+        "RESUMING": 0.0051
+      },
+      "events": [
+        [
+          "READY",
+          -0.0005
+        ],
+        [
+          "DRAINING",
+          0.0201
+        ],
+        [
+          "UPDATING",
+          0.1208
+        ],
+        [
+          "RESUMING",
+          4.2495
+        ],
+        [
+          "READY",
+          4.2546
+        ]
+      ],
+      "before": "\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is\u5927\u5bb6\u4e00\u8d77 is",
+      "after": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid.",
+      "committed": "rc-1",
+      "engine_label": "rc-1",
+      "update_phase_seconds": 4.1287
+    },
+    "restart": {
+      "kill_to_ready_seconds": 37.0449,
+      "kill_to_first_token_seconds": 37.529,
+      "text": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid.",
+      "note": "generous to the baseline: the checkpoint is already on disk, so the checkpoint write a real restart-based update needs is not counted"
+    },
+    "comparison": {
+      "hot_seconds": 4.2544,
+      "restart_kill_to_ready_seconds": 37.0449,
+      "restart_kill_to_serving_seconds": 37.529,
+      "speedup_vs_ready": 8.71,
+      "speedup_vs_serving": 8.82
+    }
+  },
+  "checks": {
+    "hot_path_committed_rc1": true,
+    "hot_path_changed_the_output": true,
+    "timeline_saw_the_update": true,
+    "restart_served": true,
+    "restart_cost_is_measurable": true,
+    "hot_path_is_faster_than_a_restart": true
+  }
+}
