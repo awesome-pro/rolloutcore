@@ -41,9 +41,9 @@ if "$PY" -c "import ruff" 2>/dev/null || command -v ruff >/dev/null 2>&1; then
     RUFF=ruff
     [[ -x .venv/bin/ruff ]] && RUFF=.venv/bin/ruff
     echo "==> ruff check"
-    "$RUFF" check src tests scripts
+    "$RUFF" check src tests scripts diagnostics
     echo "==> ruff format --check"
-    "$RUFF" format --check src tests scripts
+    "$RUFF" format --check src tests scripts diagnostics
 else
     echo "==> ruff not available, skipping lint"
 fi

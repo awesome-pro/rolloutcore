@@ -1,7 +1,11 @@
 # Phase 3B runbook — real NCCL weight transfer, two GPUs
 
-**Status:** nothing here is implemented yet. Phase 3A passed (see
-`docs/phase3a-results.md`); this is the plan for the next GPU session.
+**Status: steps 1 and 2 are done.** Upstream's NCCL path was proved on a 2× RTX
+3090 node (driver 595.71.05, CUDA 13.2) — real weights broadcast over NCCL,
+dummy→coherent output, no restart. The driver is implemented in
+`src/rolloutcore/adapters/nccl.py` with 20 GPU-free tests. What remains is
+Phase 3C: running `diagnostics/rolloutcore_cycle_2gpu.py` so the update goes
+through `LifecycleRunner.run_cycle`.
 
 ---
 
@@ -69,15 +73,45 @@ Upstream's example defaults to **three** GPUs (TP=2 inference on 0-1, trainer on
    Cost is roughly 2× the single-GPU rate (~$0.7/h for 2× A6000).
 4. Expose TCP **22** (SSH, for rsync/tmux) and **8888** (Jupyter). Never expose
    8000 — the dev endpoints are unauthenticated.
-5. Verify **both** GPUs before anything else:
+5. **Check the driver before you deploy, not after.** RunPod's GPU card shows an
+   **"Available CUDA versions"** field — that is the host driver's maximum, and
+   it decides your wheel variant:
+
+   | Card says | Driver | Variant |
+   |---|---|---|
+   | `13.0` | ≥ R580 | `cu130` |
+   | `12.9` | ≥ R575 | `cu129` |
+   | `12.8` or older | < R575 | **neither ships natively** |
+
+   CUDA 13 needs R580+ (`gpu.cuda.inc.md:327`). A host on driver 570 reports
+   CUDA 12.8 and cannot run a cu130 build at all — observed on an A40 host. Two
+   remedies: pick a machine whose card advertises 13.0, or use the CUDA
+   forward-compatibility route (`gpu.cuda.inc.md:325-340`), which vLLM's own
+   image bundles for pro/datacenter GPUs. Redeploying is usually cheaper.
+
+   Hosts actually seen on RunPod (driver varies per machine, not per GPU type —
+   so read the field, do not assume from the card name):
+
+   | Host GPU | Driver | Max CUDA | cu130? |
+   |---|---|---|---|
+   | 1× A6000 | 580.159.03 | 13.0 | yes — Phase 3A ran here |
+   | 2× A40 | 570.195.03 | 12.8 | **no** — below the R580 floor |
+   | 2× RTX 2000 Ada | (card advertised 13.0) | 13.0 | yes (not deployed) |
+
+   VRAM is not the constraint: `opt-125m` is 250 MB, so a 2× 16 GB machine is as
+   good as a 2× 48 GB one and often cheaper.
+
+6. Verify **both** GPUs, and prove a kernel actually launches — `is_available()`
+   alone is not enough, because it can report `True` while context creation
+   fails on an older driver:
 
 ```bash
-nvidia-smi --query-gpu=index,name,memory.total --format=csv
-python3 -c "import torch; print(torch.cuda.device_count(), torch.cuda.device_names(0))"
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv
+python3 -c "import torch; a=torch.randn(8, device='cuda:0'); print('kernel ok', float((a+a).sum())); print('devices', torch.cuda.device_count())"
 ```
 
-**Checkpoint B1 — proceed only if** `torch.cuda.device_count() == 2` and
-`nvidia-smi` lists two devices.
+**Checkpoint B1 — proceed only if** `torch.cuda.device_count() == 2`, the kernel
+test prints a value, and `nvidia-smi` lists two devices.
 
 ## 3. Same install as Phase 3A
 
@@ -101,19 +135,10 @@ python3 -c "import vllm; print(vllm.__version__)"     # must contain g00b7847c8
 Do **not** start with RolloutCore code. Adapt vLLM's own example so that the
 only thing under test is the environment:
 
-```bash
-cd /workspace/rolloutcore
-cp /workspace/vllm/examples/rl/rlhf_http_nccl.py scripts/_upstream_nccl_2gpu.py
-```
-
-If you installed vLLM from a wheel there is no source tree; fetch just the file:
-
-```bash
-mkdir -p scripts && curl -sL -o scripts/_upstream_nccl_2gpu.py \
-  https://raw.githubusercontent.com/vllm-project/vllm/00b7847c8036b667742b4efb21aab1de51fd4721/examples/rl/rlhf_http_nccl.py
-```
-
-Then make exactly these edits:
+The adapted file is already in the repository at
+`diagnostics/upstream_nccl_2gpu.py` — vendored from upstream at the audited
+commit and reduced to two GPUs before anyone rents a machine, so no editing
+happens on paid GPU time. For reference, these are the only changes it makes:
 
 | Line | Upstream | Change to | Why |
 |---|---|---|---|
@@ -131,7 +156,7 @@ Then, in tmux:
 
 ```bash
 export HF_HOME=/workspace/hf
-python3 scripts/_upstream_nccl_2gpu.py
+python3 diagnostics/upstream_nccl_2gpu.py
 ```
 
 **What success looks like:**
@@ -190,6 +215,53 @@ READY(rc-0) --dummy weights--> generate gibberish
 
 That is when `LifecycleRunner.run_cycle()` becomes real for the first time — the
 function Phase 3A deliberately never called.
+
+### Running it
+
+Kill anything left over from an earlier attempt first. The harness starts its own
+server with `start_new_session=True`, so a Ctrl-C'd run can leave one holding
+port 8000, and the next run then dies with "vLLM exited before becoming ready":
+
+```bash
+pkill -f "vllm serve"; sleep 3
+cd /workspace/rolloutcore && source .venv/bin/activate
+export HF_HOME=/workspace/hf
+python3 diagnostics/rolloutcore_cycle_2gpu.py
+```
+
+Server output goes to `results/phase3c-server.log`, **not** the terminal. That is
+deliberate: `vllm serve` logs every readiness poll, and in the first attempt that
+buried the harness's own output so completely that a healthy server looked like a
+hang. The script now prints its own progress and dumps the log tail on failure.
+
+Expect:
+
+```
+[server] ready after 41.2s (pid 5176)
+[trainer] loading facebook/opt-125m on cuda:1
+[identity] rc-1: 197 tensors, ... (manifest)
+[cycle] bootstrap
+[before] ' the the the of of of ...'
+[cycle] run_cycle -> rc-1
+[after]  ' the capital of France is Paris'
+
+=== Phase 3C ===
+  [PASS] committed_rc1
+  [PASS] engine_label_rc1
+  [PASS] engine_resumed
+  [PASS] output_changed
+  [PASS] server_never_restarted
+  [report] /workspace/rolloutcore/results/phase3c.json
+```
+
+`committed_rc1` proves the commit point is the resume, and `engine_label_rc1`
+proves the version handshake — upstream's `send_weights()` calls
+`finish_weight_update()` with no version (`nccl_engine.py:361`), so without
+`RolloutCoreWeightSyncClient` supplying one, VALIDATING would taint on a
+*successful* transfer.
+
+If the run goes quiet again, do not wait out the timeout: `tail -f
+results/phase3c-server.log` shows what the server is actually doing.
 
 ## 7. When NCCL hangs (the expected first failure)
 

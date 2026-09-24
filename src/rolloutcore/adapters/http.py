@@ -315,7 +315,7 @@ class HttpVLLMAdapter:
         """Open the update. With a driver, the *driver* posts the session opener.
 
         Upstream's trainer engine drives ``/start_weight_update`` from inside
-        ``send_weights()`` (``vllm/distributed/weight_transfer/base.py:617-627``),
+        ``send_weights()`` (``vllm/distributed/weight_transfer/base.py:617-623``),
         concurrently with the collective, so posting it here as well would open
         the session twice. This method therefore validates that a driver can
         install weights at all and records the target; it sends nothing.

@@ -19,7 +19,7 @@ Upstream does not split the update round trip. The trainer-side engine built by
 ``/init_weight_transfer_engine``, and its ``send_weights()`` drives
 ``/start_weight_update`` -> ``/update_weights`` -> ``/finish_weight_update``
 *concurrently* with the collective broadcast
-(``vllm/distributed/weight_transfer/base.py:551-627``). The reference example
+(``vllm/distributed/weight_transfer/base.py:551-626``). The reference example
 says so explicitly: "Drives start_weight_update / update_weights /
 finish_weight_update, concurrent with the NCCL broadcast"
 (``examples/rl/rlhf_http_nccl.py:193-196``).

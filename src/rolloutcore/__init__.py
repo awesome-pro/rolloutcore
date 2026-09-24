@@ -24,6 +24,7 @@ from .errors import (
     RolloutCoreError,
     UnknownRolloutError,
     VersionMismatchError,
+    WeightIdentityMismatchError,
     WeightTransferNotConfiguredError,
 )
 from .evidence import (
@@ -114,6 +115,7 @@ __all__ = [
     "VersionMismatchError",
     "WeightIdentity",
     "WeightIdentityError",
+    "WeightIdentityMismatchError",
     "WeightProvenance",
     "WeightTransferDriver",
     "WeightTransferInit",

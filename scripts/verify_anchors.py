@@ -8,13 +8,21 @@ re-derives every anchor from the checkout and fails if any does not resolve.
 
     python scripts/verify_anchors.py --vllm /path/to/vllm
 
-Anchors are the backticked ``path.py:123`` / ``path.py:123-456`` tokens in the
-Markdown files. A bare basename (``core.py:137``) is accepted if *some* file with
-that name contains the line; ambiguous basenames are reported so they can be
-qualified rather than silently trusted.
+Anchors are the backticked ``path.py:<line>`` / ``path.py:<first>-<last>`` tokens
+in the scanned files (docs *and* Python source). A bare basename
+(``core.py:<line>``) is accepted if *some* file with that name contains the line;
+ambiguous basenames are reported so they can be qualified rather than silently
+trusted.
 
 Exits 0 when every anchor resolves, 1 otherwise. With no ``--vllm`` (or a missing
 directory) it prints a skip notice and exits 0, so it is safe in CI.
+
+**Limitation.** This checks that the anchored lines *exist*, not that they say
+what the surrounding prose claims. An anchor into the wrong-but-real region of a
+file passes. Widening the scan to ``src/`` caught two citations that ran one line
+past EOF and one that pointed at ``iter_groups`` while naming ``ParamMeta``;
+nothing mechanical would have caught the last one, so spot-check anchors you
+touch.
 """
 
 from __future__ import annotations
@@ -24,14 +32,26 @@ import re
 import sys
 from pathlib import Path
 
-#: ``path.py:12``, ``path.py:12-34``, ``core.py:137``.
+#: ``path.py:<line>``, ``path.py:<first>-<last>``, ``core.py:<line>``.
+#: Written with a placeholder so this file's own examples are not scanned as
+#: claims -- the verifier is in its own scan set.
 ANCHOR = re.compile(r"`([A-Za-z0-9_./-]+\.py):(\d+)(?:-(\d+))?`")
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def markdown_files(root: Path) -> list[Path]:
-    return sorted([*root.glob("*.md"), *root.glob("docs/*.md")])
+def scanned_files(root: Path) -> list[Path]:
+    """Docs *and* source: the adapters cite upstream lines in their docstrings,
+    and an unverified claim in `src/` is no better than one in a docstring."""
+    return sorted(
+        [
+            *root.glob("*.md"),
+            *root.glob("docs/*.md"),
+            *root.glob("src/**/*.py"),
+            *root.glob("scripts/*.py"),
+            *root.glob("diagnostics/*.py"),
+        ]
+    )
 
 
 def main() -> int:
@@ -60,8 +80,9 @@ def main() -> int:
     lengths: dict[Path, int] = {}
     total = ambiguous = 0
     bad: list[str] = []
-    for md in markdown_files(ROOT):
-        for n, line in enumerate(md.read_text(encoding="utf-8").splitlines(), 1):
+    for src in scanned_files(ROOT):
+        where = src.relative_to(ROOT).as_posix()
+        for n, line in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
             for raw_path, first, last in ANCHOR.findall(line):
                 total += 1
                 if "/" in raw_path:
@@ -72,13 +93,13 @@ def main() -> int:
                 else:
                     candidates = by_name.get(raw_path, [])
                 if not candidates:
-                    bad.append(f"{md.name}:{n} {raw_path}:{first} (file not found)")
+                    bad.append(f"{where}:{n} {raw_path}:{first} (file not found)")
                     continue
                 if len(candidates) > 1:
                     ambiguous += 1
                 hi = int(last or first)
                 if int(first) < 1 or hi < int(first):
-                    bad.append(f"{md.name}:{n} {raw_path}:{first}-{last} (bad range)")
+                    bad.append(f"{where}:{n} {raw_path}:{first}-{last} (bad range)")
                     continue
                 resolved = []
                 for cand in candidates:
@@ -92,7 +113,7 @@ def main() -> int:
                 if not resolved:
                     worst = max(lengths[c] for c in candidates)
                     bad.append(
-                        f"{md.name}:{n} {raw_path}:{first}-{last} "
+                        f"{where}:{n} {raw_path}:{first}-{last} "
                         f"(beyond EOF: file has {worst} lines)"
                     )
 

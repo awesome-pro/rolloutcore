@@ -1,7 +1,12 @@
 # Phase 3B notes — the target-aware weight-sync client
 
-**Status:** planning only. Nothing here is implemented; Phase 3B starts after
-Phase 3A passes on a real GPU.
+**Status: implemented.** `NCCLWeightTransferDriver` and
+`RolloutCoreWeightSyncClient` live in `src/rolloutcore/adapters/nccl.py`, with 20
+tests in `tests/test_nccl_driver.py` that inject a fake client, trainer engine and
+manifest source so the logic is covered without vLLM or a GPU. The environment
+was proved first with upstream's own example (`diagnostics/upstream_nccl_2gpu.py`
+-- see `docs/phase3b-runbook.md` §4), which transferred real weights over NCCL on
+a 2× RTX 3090.
 
 ---
 
@@ -26,6 +31,8 @@ label up. That publishes a version whose weights we did not prove, which is the
 one thing the design forbids (I8: no automatic reconciliation).
 
 ## The fix: a wrapper client, not a patch-up call
+
+Implemented as described; the sketch below is the design record.
 
 ```python
 class RolloutCoreWeightSyncClient:

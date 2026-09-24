@@ -7,11 +7,14 @@
   implementation of the port, used for no-GPU cycle tests and the demo.
 * :mod:`rolloutcore.adapters.http` -- ``HttpVLLMAdapter``, a thin stdlib client
   over a real ``vllm serve``.
+* :mod:`rolloutcore.adapters.nccl` -- ``NCCLWeightTransferDriver``, the real
+  trainer-side weight transfer (imports vLLM lazily, inside its methods).
 """
 
 from .fake import FakeVLLMAdapter, manifest_identity, seeded_engine
 from .fake_engine import FakeEngineError, FakeVLLMEngine
 from .http import HTTPAdapterError, HttpVLLMAdapter, Response, Transport, UrllibTransport
+from .nccl import NCCLWeightTransferDriver, RolloutCoreWeightSyncClient
 
 __all__ = [
     "FakeEngineError",
@@ -19,7 +22,9 @@ __all__ = [
     "FakeVLLMEngine",
     "HTTPAdapterError",
     "HttpVLLMAdapter",
+    "NCCLWeightTransferDriver",
     "Response",
+    "RolloutCoreWeightSyncClient",
     "Transport",
     "UrllibTransport",
     "manifest_identity",

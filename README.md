@@ -15,11 +15,13 @@ weight source that produced it.
 > state machine, the typed adapter port, a stdlib HTTP adapter for the lifecycle
 > **control plane**, and a full `READY → … → READY` cycle against an in-memory
 > fake engine. Real weight transfer (NCCL) is **not** implemented, and real-GPU
-> **Phase 3A passed on real hardware** (2026-09-24): 16/16 checks against a real
-> `vllm serve` at the audited commit, on one A6000 — see
-> `docs/phase3a-results.md`. Real *weight replacement* is still not implemented:
-> NCCL transfer is Phase 3B (`docs/phase3b-notes.md`). Do not point this at a GPU
-> expecting a hot weight update yet.
+> **Phase 3A passed on real hardware** (2026-09-24): 16/16 control-plane checks
+> against a real `vllm serve` at the audited commit — `docs/phase3a-results.md`.
+> **Phase 3B is implemented and its transport proved**: real weights broadcast
+> over NCCL from a trainer to a live vLLM on a 2× RTX 3090 node, with the
+> target-aware version handshake (`src/rolloutcore/adapters/nccl.py`). Phase 3C —
+> the same update driven through `LifecycleRunner.run_cycle` — is
+> `diagnostics/rolloutcore_cycle_2gpu.py`.
 
 ---
 
@@ -121,7 +123,7 @@ real GitHub tip, not a local fork:
 The sibling checkout `vendor/vllm` is a stale fork (`d90f0eade5`) and was not
 used. The worktree is a shallow clone (depth 1), so **"NOT PRESENT" means absent
 at this commit, not never existed**. `scripts/verify_anchors.py` re-derives every
-backticked `file.py:LINE` claim from the checkout: **413 anchors resolve to real
+backticked `file.py:LINE` claim from the checkout: **414 anchors resolve to real
 files with in-range line numbers, 0 unresolved** (134 of them via a basename that
 appears in several directories, so the line was checked against each candidate).
 
@@ -147,4 +149,5 @@ scripts/live_control_plane_smoke.py  Phase 3A real-server harness (JSON artifact
 scripts/test.sh            Dependency-free check runner
 scripts/verify_anchors.py  Re-derives the docs' vLLM file:LINE claims
 tests/fake_dev_server.py   Stub vLLM dev server, so 3A is rehearsed off-GPU
+diagnostics/   Vendored upstream NCCL example, adapted for the 2-GPU pod
 ```

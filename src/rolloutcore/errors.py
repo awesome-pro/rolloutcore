@@ -30,7 +30,7 @@ Three further cases are neither, and are separated for the same reason:
 
 from __future__ import annotations
 
-from .versions import WeightVersion
+from .versions import WeightIdentity, WeightVersion
 
 
 class RolloutCoreError(Exception):
@@ -144,6 +144,26 @@ class DrainFailedError(RolloutCoreError):
         super().__init__(
             f"drain did not complete{detail}. The engine remains paused; "
             "resuming is an operator decision."
+        )
+
+
+class WeightIdentityMismatchError(InvariantViolation):
+    """A driver would stage different weights than the target declares.
+
+    Raised **before** any request is sent, so the engine is untouched and the
+    controller is left where it was. Deliberately not a taint: there is no
+    ambiguous half-applied effect to reason about, only a caller that asked for
+    the wrong source. Phase 3B makes this comparison from the source's own
+    manifest (``ModuleSource.metadata()``) rather than trusting the target.
+    """
+
+    def __init__(self, expected: WeightIdentity, computed: WeightIdentity) -> None:
+        self.expected = expected
+        self.computed = computed
+        super().__init__(
+            "I4-IDENTITY",
+            f"the driver would stage {computed.describe()} but "
+            f"{expected.describe()} is the target; refusing before any request is sent",
         )
 
 
