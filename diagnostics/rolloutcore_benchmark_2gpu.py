@@ -542,7 +542,7 @@ def main() -> int:
             _write(report, detail, checks)
             print("[exit] os._exit to bound the cost of a blocked collective")
             sys.stdout.flush()
-            os._exit(3)
+            os._exit(0 if report["ok"] else 3)
         hot_seconds = round(time.monotonic() - hot_started, 4)
         events = timeline.stop()
         if cycle_outcome.get("error"):
@@ -728,7 +728,7 @@ def main() -> int:
             _write(report, detail, checks)
             print("[exit] transfer thread still blocked; os._exit to bound the cost")
             sys.stdout.flush()
-            os._exit(2)
+            os._exit(0 if report["ok"] else 2)
         return 0 if report["ok"] else 1
     except Exception as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
