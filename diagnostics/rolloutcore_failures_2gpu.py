@@ -623,6 +623,20 @@ def main() -> int:
             runner4.run_cycle(dead_target)
         except Exception as exc:
             drain_path_error = f"{type(exc).__name__}: {exc}"
+        # Reported now, not after C2: an earlier run lost this result because C2's
+        # setup raised before C1's checks were ever recorded.
+        detail["dead_engine_drain_path"] = {
+            "error": drain_path_error,
+            "state": ctrl4.state.value,
+            "tainted": ctrl4.is_tainted,
+            "committed": ctrl4.current_version.label if ctrl4.current_version else None,
+        }
+        record(checks, "C_drain_path_surfaces_a_failure", drain_path_error is not None)
+        record(
+            checks,
+            "C_nothing_was_committed",
+            detail["dead_engine_drain_path"]["committed"] == "rc-0",
+        )
 
         # C2 -- the mutating path, and the designed taint. A fresh controller
         # cannot even bootstrap: its first read fails with an unknown engine
@@ -650,25 +664,13 @@ def main() -> int:
         except Exception as exc:  # setup only; the scenario still reports
             taint_error = taint_error or f"setup failed: {type(exc).__name__}: {exc}"
 
-        detail["engine_death"] = {
-            "drain_path_error": drain_path_error,
-            "drain_path_state": ctrl4.state.value,
-            "drain_path_tainted": ctrl4.is_tainted,
-            "drain_path_committed": (
-                ctrl4.current_version.label if ctrl4.current_version else None
-            ),
+        detail["dead_engine_taint"] = {
             "bootstrap_error": taint_error,
             "tainted": ctrl6.is_tainted if ctrl6 else None,
             "taint_reason": ctrl6.taint_reason if ctrl6 else None,
             "second_cycle": refused,
             "second_cycle_seconds": refusal_seconds,
         }
-        record(checks, "C_drain_path_surfaces_a_failure", drain_path_error is not None)
-        record(
-            checks,
-            "C_nothing_was_committed",
-            detail["engine_death"]["drain_path_committed"] == "rc-0",
-        )
         record(checks, "C_bootstrap_on_a_dead_engine_taints", bool(ctrl6 and ctrl6.is_tainted))
         record(checks, "C_taint_has_a_reason", bool(ctrl6 and ctrl6.taint_reason))
         record(checks, "C_taint_is_terminal", bool(refused and "IllegalTransition" in refused))
@@ -701,15 +703,15 @@ def main() -> int:
         print(f"  A in-flight    : {detail['drain_failure']['inflight_outcome']}")
         print(f"  B mismatch     : {detail['identity_mismatch']['error']}")
         print(f"  B handback     : {detail['identity_mismatch']['fresh_controller_bootstrap']}")
-        print(f"  C drain path   : {detail['engine_death']['drain_path_error']}")
+        print(f"  C drain path   : {detail['dead_engine_drain_path']['error']}")
         print(
-            f"  C drain result : state={detail['engine_death']['drain_path_state']} "
-            f"tainted={detail['engine_death']['drain_path_tainted']} "
-            f"committed={detail['engine_death']['drain_path_committed']}"
+            f"  C drain result : state={detail['dead_engine_drain_path']['state']} "
+            f"tainted={detail['dead_engine_drain_path']['tainted']} "
+            f"committed={detail['dead_engine_drain_path']['committed']}"
         )
-        print(f"  C bootstrap    : {detail['engine_death']['bootstrap_error']}")
-        print(f"  C taint reason : {detail['engine_death']['taint_reason']}")
-        print(f"  C retry        : {detail['engine_death']['second_cycle']}")
+        print(f"  C bootstrap    : {detail['dead_engine_taint']['bootstrap_error']}")
+        print(f"  C taint reason : {detail['dead_engine_taint']['taint_reason']}")
+        print(f"  C retry        : {detail['dead_engine_taint']['second_cycle']}")
         print(f"  D fresh label  : {detail['fresh_recovery']['engine_label']}")
         print(
             f"  RESULT: {'PASS' if report['ok'] else 'FAIL'} "
