@@ -12,9 +12,12 @@ Design rationale and the invariant-to-transition mapping live in
 from __future__ import annotations
 
 import enum
+import functools
 import itertools
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final
+from typing import Concatenate, Final, ParamSpec, TypeVar, cast
 
 from .errors import (
     DrainDisagreementError,
@@ -39,6 +42,39 @@ from .evidence import (
     ValidateEvidence,
 )
 from .versions import INITIAL_VERSION, UpdateTarget, WeightIdentity, WeightVersion
+
+#: Bound to the `LifecycleController` whose access they serialize.
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def _locked(
+    fn: Callable[Concatenate[LifecycleController, P], R],
+) -> Callable[Concatenate[LifecycleController, P], R]:
+    """Serialize one controller call against the other actor.
+
+    The controller has two callers by design: the lifecycle runner, and whoever
+    owns the rollouts. They overlap exactly where it matters. A rollout must be
+    released as its request completes, because that is what makes the engine's
+    "drain completed" and RolloutCore's "no active rollouts" agree
+    (`confirm_drained`). Doing that from the request's own thread while the runner
+    is mid-cycle is the intended usage -- so the read-modify-write pairs
+    (`self._active` against `self._seq`, the drain check against the pop) need a
+    real lock rather than the GIL's per-opcode luck. Iterating `self._active`
+    while another thread pops from it can also raise outright.
+
+    Reentrant because guarded methods call one another and the properties.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self: LifecycleController, *args: P.args, **kwargs: P.kwargs) -> R:
+        with self._lock:
+            return fn(self, *args, **kwargs)
+
+    # `functools.wraps` copies `__wrapped__`, so typeshed infers a `_Wrapped`
+    # type that is not assignable to the declared `Callable`; the cast keeps the
+    # docstring the decorator preserves.
+    return cast("Callable[Concatenate[LifecycleController, P], R]", wrapper)
 
 
 class LifecycleState(enum.StrEnum):
@@ -156,6 +192,7 @@ class LifecycleController:
         "_active",
         "_current_target",
         "_journal",
+        "_lock",
         "_orphaned",
         "_pending_target",
         "_seq",
@@ -165,6 +202,7 @@ class LifecycleController:
     )
 
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         self._state: LifecycleState = LifecycleState.UNINITIALIZED
         self._current_target: UpdateTarget | None = None
         self._pending_target: UpdateTarget | None = None
@@ -178,62 +216,76 @@ class LifecycleController:
     # ------------------------------------------------------------------ views
 
     @property
+    @_locked
     def state(self) -> LifecycleState:
         return self._state
 
     @property
+    @_locked
     def current_target(self) -> UpdateTarget | None:
         """The last *committed* target. ``None`` before successful bootstrap."""
         return self._current_target
 
     @property
+    @_locked
     def current_version(self) -> WeightVersion | None:
         return self._current_target.version if self._current_target else None
 
     @property
+    @_locked
     def current_identity(self) -> WeightIdentity | None:
         return self._current_target.identity if self._current_target else None
 
     @property
+    @_locked
     def pending_target(self) -> UpdateTarget | None:
         """The in-flight target. Never published until RESUMING succeeds."""
         return self._pending_target
 
     @property
+    @_locked
     def pending_version(self) -> WeightVersion | None:
         return self._pending_target.version if self._pending_target else None
 
     @property
+    @_locked
     def active_rollouts(self) -> tuple[RolloutBinding, ...]:
         return tuple(self._active.values())
 
     @property
+    @_locked
     def active_rollout_count(self) -> int:
         return len(self._active)
 
     @property
+    @_locked
     def orphaned_rollouts(self) -> tuple[OrphanedRollout, ...]:
         """Bindings retained for forensics after a taint. Never discarded."""
         return tuple(self._orphaned)
 
     @property
+    @_locked
     def journal(self) -> tuple[TransitionRecord, ...]:
         return tuple(self._journal)
 
     @property
+    @_locked
     def taint_reason(self) -> str | None:
         return self._taint_reason
 
     @property
+    @_locked
     def tainted_in_state(self) -> str | None:
         """Which state the controller was in when it was tainted."""
         return self._tainted_in_state
 
     @property
+    @_locked
     def is_tainted(self) -> bool:
         return self._state is LifecycleState.TAINTED
 
     @property
+    @_locked
     def is_serving(self) -> bool:
         return self._state in ADMITTING_STATES
 
@@ -343,6 +395,7 @@ class LifecycleController:
 
     # ----------------------------------------------------------- transitions
 
+    @_locked
     def initialize(self, evidence: BootstrapEvidence) -> None:
         """UNINITIALIZED -> READY. Binds the controller to a proven fresh engine.
 
@@ -370,6 +423,7 @@ class LifecycleController:
         self._advance(Event.INITIALIZE, detail=f"backend={evidence.backend}")
         self._current_target = UpdateTarget(version=observed, identity=evidence.weight_identity)
 
+    @_locked
     def begin_drain(self) -> CyclePlan:
         """READY -> DRAINING. Requests the quiesce.
 
@@ -386,6 +440,7 @@ class LifecycleController:
             tags=("pause", "drain"),
         )
 
+    @_locked
     def confirm_drained(self, evidence: DrainEvidence) -> None:
         """DRAINING -> QUIESCED. Requires proof of zero active work.
 
@@ -419,6 +474,7 @@ class LifecycleController:
         self._check_evidence(evidence)
         self._advance(Event.CONFIRM_DRAINED, detail=evidence.note)
 
+    @_locked
     def begin_update(self, target: UpdateTarget) -> CyclePlan:
         """QUIESCED -> UPDATING. Opens a weight-transfer session.
 
@@ -451,6 +507,7 @@ class LifecycleController:
             tags=("start_weight_update", "update_weights"),
         )
 
+    @_locked
     def confirm_updated(self, evidence: UpdateEvidence) -> CyclePlan:
         """UPDATING -> INVALIDATING. The weights are installed and finalized.
 
@@ -490,6 +547,7 @@ class LifecycleController:
             tags=("reset_prefix_cache", "reset_encoder_cache", "reset_mm_cache"),
         )
 
+    @_locked
     def confirm_invalidated(self, evidence: InvalidateEvidence) -> CyclePlan:
         """INVALIDATING -> VALIDATING. Every previous-generation cache is gone.
 
@@ -519,6 +577,7 @@ class LifecycleController:
             tags=("get_weight_info", "get_is_paused"),
         )
 
+    @_locked
     def confirm_validated(self, evidence: ValidateEvidence) -> CyclePlan:
         """VALIDATING -> RESUMING. Correctness proven **while still paused**.
 
@@ -567,6 +626,7 @@ class LifecycleController:
             tags=("resume", "get_is_paused"),
         )
 
+    @_locked
     def confirm_resumed(self, evidence: ResumeEvidence) -> None:
         """RESUMING -> READY. The engine is serving. **The commit point.**
 
@@ -608,6 +668,7 @@ class LifecycleController:
         self._current_target = pending
         self._pending_target = None
 
+    @_locked
     def taint(self, reason: str) -> EngineTaintedError:
         """Move to TAINTED from anywhere. Used for operator aborts and faults.
 
@@ -622,6 +683,7 @@ class LifecycleController:
 
     # ------------------------------------------------------ rollout admission
 
+    @_locked
     def next_target(self, identity: WeightIdentity | None = None) -> UpdateTarget:
         """Build the target for the next generation.
 
@@ -641,6 +703,7 @@ class LifecycleController:
             identity=identity or self._current_target.identity,
         )
 
+    @_locked
     def admit_rollout(self, request_id: str) -> RolloutBinding:
         """Bind a new rollout to the current committed target.
 
@@ -685,10 +748,12 @@ class LifecycleController:
         )
         return binding
 
+    @_locked
     def finish_rollout(self, request_id: str) -> RolloutBinding:
         """Release a completed rollout. Legal in READY and DRAINING."""
         return self._release_rollout(request_id, event="finish_rollout")
 
+    @_locked
     def abort_rollout(self, request_id: str) -> RolloutBinding:
         """Release an aborted rollout. Legal in READY and DRAINING."""
         return self._release_rollout(request_id, event="abort_rollout")
