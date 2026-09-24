@@ -496,6 +496,15 @@ def main() -> int:
         cycle_outcome: dict[str, Any] = {}
 
         def do_hot_cycle() -> None:
+            # PyTorch's current CUDA device is thread-local, and a new thread starts
+            # on the default device. vLLM's packed producer builds its CUDA streams
+            # from `torch.accelerator.current_device_index()`
+            # (packed_tensor.py:23-24), so without this the broadcast runs the
+            # trainer's GPU-1 tensors and communicator on GPU-0 streams, and NCCL
+            # reports `Cuda failure 400 'invalid resource handle'` -- which says
+            # nothing about the cause. This one line is what five failed pod runs
+            # were: the transfer is device-sensitive to the calling thread.
+            torch.cuda.set_device(TRAINER_DEVICE_INDEX)
             try:
                 cycle_outcome["result"] = runner.run_cycle(ctrl.next_target(identity))
             except BaseException as exc:
@@ -604,6 +613,7 @@ def main() -> int:
             outcome: dict[str, Any] = {}
 
             def cycle() -> None:
+                torch.cuda.set_device(TRAINER_DEVICE_INDEX)  # thread-local; see above
                 began = time.monotonic()
                 try:
                     runner3.run_cycle(ctrl3.next_target(identity3))

@@ -42,6 +42,7 @@ from rolloutcore import (
 from rolloutcore.adapters.nccl import (
     NCCLWeightTransferDriver,
     RolloutCoreWeightSyncClient,
+    device_mismatch,
     dtype_name,
     param_spec,
 )
@@ -378,6 +379,46 @@ class TestIdentityPrecheck(unittest.TestCase):
         )
         self.assertEqual(driver.identity().exactness, "declared-source")
         self.assertEqual(driver.declare(WeightProvenance(step=10)).exactness, "declared-source")
+
+
+class TestThreadDeviceRule(unittest.TestCase):
+    """The rule behind five failed pod runs, testable with no GPU and no torch.
+
+    PyTorch's current CUDA device is thread-local: a spawned thread starts on the
+    default device, so a transfer issued from a worker thread streams the trainer's
+    tensors on the wrong one. NCCL's own message for that is "Cuda failure 400
+    invalid resource handle", which names neither the device nor the thread.
+    """
+
+    def test_same_device_is_fine(self):
+        self.assertIsNone(device_mismatch(1, 1))
+        self.assertIsNone(device_mismatch(0, 0))
+
+    def test_unknown_on_either_side_is_not_a_mismatch(self):
+        """No torch, or no CUDA, must not turn into a refusal."""
+        self.assertIsNone(device_mismatch(None, 1))
+        self.assertIsNone(device_mismatch(1, None))
+        self.assertIsNone(device_mismatch(None, None))
+
+    def test_a_different_device_names_both_and_the_fix(self):
+        message = device_mismatch(1, 0)
+        self.assertIsNotNone(message)
+        assert message is not None  # for mypy
+        self.assertIn("cuda:1", message)
+        self.assertIn("cuda:0", message)
+        self.assertIn("thread-local", message)
+        self.assertIn("torch.cuda.set_device(1)", message)
+
+    def test_transfer_refuses_before_any_request_on_a_wrong_thread(self):
+        driver, client, _engine = make_driver()
+        driver.initialize()
+        # Pretend the rendezvous happened on device 1 and we are now elsewhere.
+        driver._device = 1
+        driver._current_device = staticmethod(lambda: 0)  # type: ignore[method-assign]
+        with self.assertRaises(WeightTransferNotConfiguredError) as ctx:
+            driver.transfer(TARGET_V1)
+        self.assertIn("cuda:1", str(ctx.exception))
+        self.assertNotIn("start_weight_update", client.names())
 
 
 class TestFailurePropagation(unittest.TestCase):

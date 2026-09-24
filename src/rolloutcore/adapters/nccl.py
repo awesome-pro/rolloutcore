@@ -66,6 +66,32 @@ class ManifestSource(Protocol):
     def metadata(self) -> Sequence[Any]: ...
 
 
+def device_mismatch(initialized_on: int | None, current: int | None) -> str | None:
+    """Describe a thread/device mismatch, or ``None`` if there is not one.
+
+    Split out from the driver so the rule can be tested with no GPU and no torch.
+
+    PyTorch's current CUDA device is **thread-local**: a newly spawned thread starts
+    on the default device regardless of what the thread that spawned it selected.
+    vLLM's packed producer builds its CUDA streams from
+    ``torch.accelerator.current_device_index()`` (``packed_tensor.py:23-24``), so a
+    transfer issued from a worker thread runs the trainer's tensors and communicator
+    on another device's streams. NCCL reports that as
+    ``Cuda failure 400 'invalid resource handle'``, which names neither the device
+    nor the thread -- five pod runs were spent on that message.
+    """
+    if initialized_on is None or current is None or initialized_on == current:
+        return None
+    return (
+        f"the driver was initialized on cuda:{initialized_on} but this thread's current "
+        f"device is cuda:{current}. PyTorch's current device is thread-local, so a "
+        f"transfer run from another thread must call torch.cuda.set_device("
+        f"{initialized_on}) in that thread first; otherwise vLLM's packed producer "
+        f"streams the trainer's tensors on the wrong device and NCCL fails with "
+        f"'Cuda failure 400 invalid resource handle'"
+    )
+
+
 class RolloutCoreWeightSyncClient:
     """Wrap a vLLM weight-sync client and own the version at finalize.
 
@@ -185,6 +211,9 @@ class NCCLWeightTransferDriver:
     _engine: TrainerEngineProtocol | None = field(default=None, init=False, repr=False)
     _sync: RolloutCoreWeightSyncClient | None = field(default=None, init=False, repr=False)
     _identity: WeightIdentity | None = field(default=None, init=False, repr=False)
+    #: The CUDA device ``initialize()`` ran on, so ``transfer()`` can refuse to
+    #: run somewhere else. See :func:`device_mismatch`.
+    _device: int | None = field(default=None, init=False, repr=False)
 
     # ------------------------------------------------------------------ identity
 
@@ -231,6 +260,7 @@ class NCCLWeightTransferDriver:
         (``nccl_engine.py:272-318``); this call therefore inherits that blocking
         behaviour and must not be run concurrently with itself.
         """
+        self._device = self._current_device()
         inner = self.client if self.client is not None else _default_client_factory(self.base_url)
         self._sync = RolloutCoreWeightSyncClient(inner)
         self._engine = self.builder(
@@ -244,12 +274,24 @@ class NCCLWeightTransferDriver:
             note="trainer endpoint open; version handshake is owned by the wrapper client",
         )
 
+    @staticmethod
+    def _current_device() -> int | None:
+        """This thread's CUDA device, or ``None`` where torch/CUDA is unavailable."""
+        try:
+            import torch  # type: ignore[import-not-found]
+        except ImportError:  # pragma: no cover - exercised by the torch-free tests
+            return None
+        return int(torch.cuda.current_device()) if torch.cuda.is_available() else None
+
     def transfer(self, target: UpdateTarget) -> WeightTransferReport:
         """Verify, then push. Raises before any request if the identity differs."""
         if self._engine is None or self._sync is None:
             raise WeightTransferNotConfiguredError(
                 "transfer", "initialize() must run before transfer()"
             )
+        mismatch = device_mismatch(self._device, self._current_device())
+        if mismatch is not None:
+            raise WeightTransferNotConfiguredError("transfer", mismatch)
         computed = self.identity()
         if computed != target.identity:
             raise WeightIdentityMismatchError(expected=target.identity, computed=computed)
