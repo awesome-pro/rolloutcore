@@ -52,6 +52,7 @@ from .lifecycle import (
 )
 from .port import LifecycleAdapter
 from .runner import CycleResult, LifecycleRunner
+from .trajectory import Trajectory, TrajectoryError, TrajectoryRecorder
 from .versions import (
     DIGEST_PREFIX,
     ENGINE_LABEL_PREFIX,
@@ -106,6 +107,9 @@ __all__ = [
     "ResumeEvidence",
     "RolloutBinding",
     "RolloutCoreError",
+    "Trajectory",
+    "TrajectoryError",
+    "TrajectoryRecorder",
     "TransitionRecord",
     "UnknownRolloutError",
     "UpdateEvidence",

@@ -200,6 +200,27 @@ class NCCLWeightTransferDriver:
             self._identity = WeightIdentity.from_param_specs(specs, source=self.provenance)
         return self._identity
 
+    def declare(self, provenance: WeightProvenance) -> WeightIdentity:
+        """Re-declare the provenance of the weights the source now holds.
+
+        Provenance belongs to a *version*, not to the driver's lifetime. A trainer
+        that advances a step holds different weights, and a trajectory for that
+        step has to say so -- but :attr:`identity` caches, and a cached identity
+        cannot follow the weights it describes.
+
+        Without this a driver could only ever stage one step: every later update
+        would be refused by the check in :meth:`transfer` as an identity mismatch,
+        because the target would carry a provenance the driver could not declare.
+        The manifest is re-read rather than reused, so a source whose shapes also
+        changed is picked up too.
+
+        Returns the new identity -- what the following :class:`UpdateTarget`
+        should carry.
+        """
+        self.provenance = provenance
+        self._identity = None
+        return self.identity()
+
     # -------------------------------------------------------------- the driver
 
     def initialize(self) -> WeightTransferInit:

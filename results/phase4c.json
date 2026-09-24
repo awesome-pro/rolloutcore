@@ -1,0 +1,65 @@
+{
+  "phase": "4C",
+  "model": "facebook/opt-125m",
+  "ok": true,
+  "started_at": "2026-09-24T16:34:42+00:00",
+  "rolloutcore_sha": "78941f5b736740af89ea03efac2da45fd6b652e9",
+  "rolloutcore_dirty": false,
+  "vllm_version": "0.30.1rc1.dev60+g00b7847c8",
+  "cycle_seconds": 2.1404,
+  "states_visited": [
+    "READY",
+    "DRAINING",
+    "QUIESCED",
+    "UPDATING",
+    "INVALIDATING",
+    "VALIDATING",
+    "RESUMING",
+    "READY"
+  ],
+  "detail": {
+    "metrics": {
+      "hits_metric": "vllm:prefix_cache_hits_total",
+      "queries_metric": "vllm:prefix_cache_queries_total",
+      "available": true
+    },
+    "pre_update": {
+      "cold_text": "<s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s>",
+      "warm_text": "<s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s>",
+      "hits_after_cold": 0.0,
+      "hits_after_warm": 32.0,
+      "hit_delta_on_repeat": 32.0,
+      "queries": 68.0
+    },
+    "post_update": {
+      "first_text": " Lisbon. The capital of the United Kingdom is London. The capital of the United",
+      "first_hit_delta": 0.0,
+      "second_text": " Lisbon. The capital of the United Kingdom is London. The capital of the United",
+      "second_hit_delta": 32.0,
+      "weight_version": "rc-1"
+    },
+    "hazard": {
+      "seeded_text": " Lisbon. The capital of the United Kingdom is London. The capital of the United",
+      "pause_cleared_cache": false,
+      "reset_skipped": true,
+      "engine_version": "rc-2",
+      "hits_with_stale_cache": 32.0,
+      "hits_with_fresh_cache": 0.0,
+      "text_with_stale_cache": " Madrid Madrid Madrid Madrid Madrid Madrid - - - - - - - - - -",
+      "text_with_fresh_cache": " a few few,,,,, and the the first.,,,",
+      "texts_differ": true,
+      "kv_reused_across_weights": true,
+      "verdict": "REUSE HAPPENED: KV computed before the weight change was handed back after it. RolloutCore's reset step is load-bearing."
+    }
+  },
+  "checks": {
+    "metrics_are_exposed": true,
+    "prefix_cache_is_actually_working": true,
+    "cycle_committed_rc1": true,
+    "no_cross_version_reuse": true,
+    "post_update_output_is_the_new_version": true,
+    "cache_still_works_after_update": true,
+    "corrupted_weights_share_the_manifest_digest": true,
+    "server_never_restarted": true
+  }
+}

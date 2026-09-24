@@ -37,6 +37,7 @@ from rolloutcore import (
     WeightTransferDriver,
     WeightTransferInit,
     WeightTransferNotConfiguredError,
+    WeightVersion,
 )
 from rolloutcore.adapters.nccl import (
     NCCLWeightTransferDriver,
@@ -325,6 +326,58 @@ class TestIdentityPrecheck(unittest.TestCase):
                 [ParamSpec("a", "f16", (2, 2))], source=WeightProvenance(step=100)
             ),
         )
+
+    def test_declare_lets_one_driver_stage_a_second_step(self):
+        """Provenance is per-version; a cached identity cannot follow the weights.
+
+        Without `declare` the driver's identity is frozen at construction, so a
+        target carrying a later step could never match it and `transfer` would
+        refuse every update after the first as an identity mismatch.
+        """
+        source = FakeSource([FakeParamMeta("a", FakeDType("f16"), (2, 2))])
+        client = FakeSyncClient()
+        engine = FakeTrainerEngine()
+
+        def builder(*, client: Any, trainer_init_info: Any, source: Any) -> FakeTrainerEngine:
+            engine.client = client
+            client.init_weight_transfer_engine({"init_info": trainer_init_info})
+            return engine
+
+        driver = NCCLWeightTransferDriver(
+            base_url="http://engine.test",
+            trainer_init_info={"rank_offset": 1, "world_size": 2},
+            source=source,
+            provenance=WeightProvenance(step=0),
+            client=client,
+            builder=builder,
+        )
+        step0 = driver.identity()
+        self.assertEqual(driver.identity(), step0, "cached until re-declared")
+
+        step1 = driver.declare(WeightProvenance(step=1))
+        self.assertNotEqual(step1, step0)
+        self.assertEqual(step1.manifest_digest, step0.manifest_digest, "same architecture")
+        self.assertEqual(driver.identity(), step1, "the cache followed")
+
+        # And the second step is now stageable, which is the point.
+        driver.initialize()
+        target = UpdateTarget(version=WeightVersion(2), identity=step1)
+        report = driver.transfer(target)
+        self.assertEqual(report.observed_identity, step1)
+
+    def test_declare_returns_a_manifest_only_identity_when_given_nothing(self):
+        """Declaring no provenance must be visible, not quietly inherited."""
+        source = FakeSource([FakeParamMeta("a", FakeDType("f16"), (2, 2))])
+        driver = NCCLWeightTransferDriver(
+            base_url="http://engine.test",
+            trainer_init_info={},
+            source=source,
+            provenance=WeightProvenance(step=9),
+            client=FakeSyncClient(),
+            builder=lambda **_kw: FakeTrainerEngine(),
+        )
+        self.assertEqual(driver.identity().exactness, "declared-source")
+        self.assertEqual(driver.declare(WeightProvenance(step=10)).exactness, "declared-source")
 
 
 class TestFailurePropagation(unittest.TestCase):
