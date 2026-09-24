@@ -10,6 +10,7 @@ answer "is the pod's NCCL fine?" separately from "is our driver fine?".
 | `upstream_nccl_2gpu.py` | vLLM's own `examples/rl/rlhf_http_nccl.py` at `00b7847c8036b667742b4efb21aab1de51fd4721`, adapted for a two-GPU pod. Proves the environment before any RolloutCore code is involved |
 | `rolloutcore_cycle_2gpu.py` | Phase 3C: the same setup, but the update runs through `LifecycleRunner.run_cycle` and the real `NCCLWeightTransferDriver` |
 | `rolloutcore_concurrency_2gpu.py` | Phase 4A: a generation spans the update, and must come out of it unchanged — the "one version per rollout" invariant, which no vLLM API enforces |
+| `rolloutcore_failures_2gpu.py` | Phase 4B: the failure paths against a real engine — a failed drain, an identity mismatch, a SIGKILLed engine, and recovery — over three engine lifetimes |
 
 ## `upstream_nccl_2gpu.py`
 
@@ -79,6 +80,43 @@ Same rules as above. The HTTP and launch helpers are duplicated between the two
 RolloutCore scripts on purpose: each has to run standalone on a pod, and a shared
 module would also hide the `/health` probe rule that
 `tests/test_script_hygiene.py` enforces per file.
+
+## `rolloutcore_failures_2gpu.py`
+
+Four scenarios over three engine lifetimes, because each one has to start from a
+known-good engine:
+
+| | Scenario | The claim it tests |
+|---|---|---|
+| A | `/pause?mode=wait` times out while a 256-token generation is in flight | `DrainFailedError` is *not* a taint; the controller stays in DRAINING and a fresh attempt finishes the cycle with no restart |
+| B | the target declares a different manifest than the trainer holds | `WeightIdentityMismatchError` before any mutation — asserted from the server log: `/start_weight_update` appears zero times |
+| C | the engine's process group is SIGKILLed | a real `ConnectionRefusedError` from a mutating call taints; the taint is terminal and refuses locally |
+| D | a third engine, a fourth controller | recovery is a fresh process; taint is controller-scoped |
+
+A uses `drain_reissues=0` deliberately: with a reissue enabled the second
+`/pause` can succeed, because the FAILED path aborts stragglers *before*
+reissuing, and the engine is then already idle. That is good behaviour but it
+would not exercise the failure.
+
+C separates two paths that behave differently, which is the point of the phase:
+
+* the **drain** path goes through `_observe`, which deliberately does not taint a
+  failed read (`runner.py:213`) — the engine is paused during DRAINING, so it
+  cannot serve anything new. That reasoning still holds for a dead engine, so the
+  controller is left in DRAINING, untainted, and the harness **records** what that
+  costs rather than asserting it;
+* the **mutating** path taints as designed, and `bootstrap()` against a dead
+  engine is the deterministic way to reach it: the very first read fails with an
+  unknown engine outcome.
+
+```bash
+pkill -f "vllm serve"; sleep 3
+python3 diagnostics/rolloutcore_failures_2gpu.py
+```
+
+Takes a few minutes and produces `results/phase4b.json` plus one server log per
+lifetime (`phase4b-server-{1,2,3}.log`). Each scenario records its own checks, so
+a failure part-way still leaves a useful artifact.
 
 This directory is deliberately outside the *type*-check scope: `scripts/test.sh`
 runs `ruff` over it, but not `mypy`, because these files import `torch`,
