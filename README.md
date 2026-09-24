@@ -19,9 +19,10 @@ weight source that produced it.
 > against a real `vllm serve` at the audited commit — `docs/phase3a-results.md`.
 > **Phase 3B is implemented and its transport proved**: real weights broadcast
 > over NCCL from a trainer to a live vLLM on a 2× RTX 3090 node, with the
-> target-aware version handshake (`src/rolloutcore/adapters/nccl.py`). Phase 3C —
-> the same update driven through `LifecycleRunner.run_cycle` — is
-> `diagnostics/rolloutcore_cycle_2gpu.py`.
+> target-aware version handshake (`src/rolloutcore/adapters/nccl.py`).
+> **Phase 3C passed** (2026-09-24): the whole update driven through
+> `LifecycleRunner.run_cycle()` on two real GPUs, `READY(rc-0) → … → READY(rc-1)`
+> in one server process — `docs/phase3c-results.md`, `results/phase3c.json`.
 
 ---
 
@@ -75,6 +76,7 @@ runner.install_next(manifest_identity("B"))        # -> READY at rc-1
 | `docs/phase3a-runbook.md` | **Runbook** — one-GPU pod setup, the exact commands, checkpoints, pass/fail criteria, troubleshooting |
 | `docs/phase3b-notes.md` | Phase 3B design — the target-aware weight-sync client and the `finish_weight_update` version gap |
 | `docs/phase3b-runbook.md` | **Runbook** — what NCCL is, the two-GPU pod, proving upstream's path first, and the NCCL hang checklist |
+| `docs/phase3c-results.md` | **Results** — the first real cycle end to end on two GPUs, and the identity limit it exposed |
 | `docs/plan-delta.md` | Original plan vs. source-map findings vs. implementation amendments |
 | `source-map-vllm-main.md` | Source-level map of vLLM `main`: 9 subsystems, every claim anchored to `file:LINE`, plus an RFC cross-check |
 | `mvp-plan.md` | The minimal real-vLLM cycle: exact HTTP call sequence, integration surface, guardrails |
