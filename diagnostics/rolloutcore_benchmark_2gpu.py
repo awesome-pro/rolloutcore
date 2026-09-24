@@ -55,7 +55,7 @@ if str(_REPO / "src") not in sys.path:
     sys.path.insert(0, str(_REPO / "src"))
 
 import torch  # noqa: E402
-from transformers import AutoModelForCausalLM  # noqa: E402
+from transformers import AutoConfig, AutoModelForCausalLM  # noqa: E402
 from vllm.distributed.weight_transfer import ModuleSource  # noqa: E402
 from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo  # noqa: E402
 from vllm.utils.network_utils import get_ip, get_open_port  # noqa: E402
@@ -402,6 +402,19 @@ def main() -> int:
     args = ap.parse_args()
     model = args.model
     packed_bytes = None if args.packed_buffer_gib is None else int(args.packed_buffer_gib * 1024**3)
+    # A cap above the checkpoint's own context is a hard error in vLLM, not a
+    # warning: "User-specified max_model_len (4096) is greater than the derived
+    # max_model_len (max_position_embeddings=2048...)". opt-125m is 2048, so a
+    # fixed default stopped it from starting at all.
+    model_max = None
+    try:
+        model_max = getattr(AutoConfig.from_pretrained(model), "max_position_embeddings", None)
+    except Exception:
+        model_max = None
+    max_model_len = args.max_model_len
+    if model_max is not None and max_model_len > int(model_max):
+        print(f"[server] clamping --max-model-len {max_model_len} -> {int(model_max)}")
+        max_model_len = int(model_max)
 
     report: dict[str, Any] = {"phase": "6", "model": model, "ok": False}
     report["flags"] = {
@@ -410,7 +423,9 @@ def main() -> int:
         "transfer_budget_seconds": args.transfer_budget,
         "drain_interval_seconds": DRAIN_INTERVAL_S,
         "gpu_memory_utilization": args.gpu_memory_utilization,
-        "max_model_len": args.max_model_len,
+        "max_model_len_requested": args.max_model_len,
+        "max_model_len_effective": max_model_len,
+        "model_max_position_embeddings": model_max,
     }
     sha, dirty = git_revision()
     report["started_at"] = datetime.now(UTC).isoformat(timespec="seconds")
@@ -432,7 +447,7 @@ def main() -> int:
             log_name,
             dummy=dummy,
             gpu_memory_utilization=args.gpu_memory_utilization,
-            max_model_len=args.max_model_len,
+            max_model_len=max_model_len,
         )
         return current
 
