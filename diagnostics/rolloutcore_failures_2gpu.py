@@ -340,8 +340,13 @@ def git_revision() -> tuple[str, bool]:
 # ------------------------------------------------------------------ engine
 
 
-def make_driver(train_model: Any) -> NCCLWeightTransferDriver:
-    group_size = world_size() + 1  # every inference worker, plus this trainer
+def make_driver(train_model: Any, *, group_size: int | None = None) -> NCCLWeightTransferDriver:
+    """A trainer driver. ``group_size`` is measured from the live engine unless it
+    is given, because asking a *dead* engine is how scenario C broke: the setup
+    itself raised ``URLError`` before the scenario could report anything.
+    """
+    if group_size is None:
+        group_size = world_size() + 1  # every inference worker, plus this trainer
     return NCCLWeightTransferDriver(
         base_url=BASE_URL,
         trainer_init_info=NCCLTrainerInitInfo(
@@ -602,6 +607,8 @@ def main() -> int:
         runner4.bootstrap()
         assert ctrl4.state is LifecycleState.READY, ctrl4.state
         dead_target = ctrl4.next_target(driver4.identity())
+        # Measured now, while the engine can still answer. C2 must not ask it.
+        live_group_size = world_size() + 1
         print(f"[C] SIGKILL the engine's process group (pid {server_c.pid})")
         _kill_engine_hard(server_c)
 
@@ -619,23 +626,29 @@ def main() -> int:
 
         # C2 -- the mutating path, and the designed taint. A fresh controller
         # cannot even bootstrap: its first read fails with an unknown engine
-        # outcome, which `bootstrap` turns into a taint.
+        # outcome, which `bootstrap` turns into a taint. Nothing here may touch
+        # the engine, or the failure would be the harness's own setup rather than
+        # the behaviour under test.
         taint_error: str | None = None
-        _d6, _a6, ctrl6, runner6 = _engine(train_model)
-        try:
-            runner6.bootstrap()
-        except Exception as exc:
-            taint_error = f"{type(exc).__name__}: {exc}"
-
-        # C3 -- a tainted controller must refuse locally: legality is checked
-        # before any precondition, so this does no network I/O at all.
         refused: str | None = None
-        began = time.monotonic()
+        refusal_seconds: float | None = None
+        ctrl6: LifecycleController | None = None
         try:
-            runner6.run_cycle(dead_target)
-        except Exception as exc:
-            refused = f"{type(exc).__name__}: {exc}"
-        refusal_seconds = round(time.monotonic() - began, 4)
+            _d6, _a6, ctrl6, runner6 = _engine(train_model, group_size=live_group_size)
+            try:
+                runner6.bootstrap()
+            except Exception as exc:
+                taint_error = f"{type(exc).__name__}: {exc}"
+            # C3 -- a tainted controller must refuse locally: legality is checked
+            # before any precondition, so this does no network I/O at all.
+            began = time.monotonic()
+            try:
+                runner6.run_cycle(dead_target)
+            except Exception as exc:
+                refused = f"{type(exc).__name__}: {exc}"
+            refusal_seconds = round(time.monotonic() - began, 4)
+        except Exception as exc:  # setup only; the scenario still reports
+            taint_error = taint_error or f"setup failed: {type(exc).__name__}: {exc}"
 
         detail["engine_death"] = {
             "drain_path_error": drain_path_error,
@@ -645,8 +658,8 @@ def main() -> int:
                 ctrl4.current_version.label if ctrl4.current_version else None
             ),
             "bootstrap_error": taint_error,
-            "tainted": ctrl6.is_tainted,
-            "taint_reason": ctrl6.taint_reason,
+            "tainted": ctrl6.is_tainted if ctrl6 else None,
+            "taint_reason": ctrl6.taint_reason if ctrl6 else None,
             "second_cycle": refused,
             "second_cycle_seconds": refusal_seconds,
         }
@@ -656,10 +669,14 @@ def main() -> int:
             "C_nothing_was_committed",
             detail["engine_death"]["drain_path_committed"] == "rc-0",
         )
-        record(checks, "C_bootstrap_on_a_dead_engine_taints", ctrl6.is_tainted)
-        record(checks, "C_taint_has_a_reason", bool(ctrl6.taint_reason))
+        record(checks, "C_bootstrap_on_a_dead_engine_taints", bool(ctrl6 and ctrl6.is_tainted))
+        record(checks, "C_taint_has_a_reason", bool(ctrl6 and ctrl6.taint_reason))
         record(checks, "C_taint_is_terminal", bool(refused and "IllegalTransition" in refused))
-        record(checks, "C_refusal_is_local", refusal_seconds < 0.05)
+        record(
+            checks,
+            "C_refusal_is_local",
+            refusal_seconds is not None and refusal_seconds < 0.05,
+        )
         # ===================================== D. recovery is a fresh process
         print("\n--- D: recovery is a fresh engine and a fresh controller ---")
         server = start_vllm_server(LOG_3)
@@ -671,7 +688,7 @@ def main() -> int:
             "state": ctrl5.state.value,
             "engine_label": weight_info(),
             "text": recovered_text,
-            "prev_controller_still_tainted": ctrl6.is_tainted,
+            "prev_controller_still_tainted": ctrl6.is_tainted if ctrl6 else None,
         }
         record(checks, "D_fresh_controller_bootstraps", ctrl5.state is LifecycleState.READY)
         record(checks, "D_fresh_engine_is_rc0", weight_info() == "rc-0")
@@ -718,10 +735,14 @@ def main() -> int:
 
 
 def _engine(
-    train_model: Any, *, drain_timeout: float = 600.0, drain_reissues: int = 2
+    train_model: Any,
+    *,
+    drain_timeout: float = 600.0,
+    drain_reissues: int = 2,
+    group_size: int | None = None,
 ) -> tuple[NCCLWeightTransferDriver, HttpVLLMAdapter, LifecycleController, LifecycleRunner]:
     """A fresh driver/adapter/controller/runner against the running server."""
-    driver = make_driver(train_model)
+    driver = make_driver(train_model, group_size=group_size)
     adapter = make_adapter(driver, drain_timeout=drain_timeout, drain_reissues=drain_reissues)
     ctrl = LifecycleController()
     runner = LifecycleRunner(ctrl, adapter, drain_polls=600, drain_interval=2.0)
