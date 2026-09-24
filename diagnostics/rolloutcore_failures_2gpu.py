@@ -318,7 +318,16 @@ def make_adapter(
 
 
 def drain_until_quiesced(ctrl: LifecycleController, adapter: HttpVLLMAdapter) -> int:
-    """Start a pause attempt and poll until the controller accepts the drain."""
+    """Take the controller to QUIESCED, from READY or from a DRAINING retry.
+
+    Scenario A's recovery arrives here *already* in DRAINING (the failed cycle
+    left it there), and scenario B arrives from READY. `confirm_drained` is only
+    legal from DRAINING, so the controller-side half of the drain has to happen
+    here rather than being assumed by the caller -- getting that wrong is exactly
+    the bug the first pod run of this script hit.
+    """
+    if ctrl.state is LifecycleState.READY:
+        ctrl.begin_drain()
     adapter.begin_drain()
     for poll in range(1, 601):
         try:
@@ -347,6 +356,17 @@ def drive_to_ready(ctrl: LifecycleController, adapter: HttpVLLMAdapter, target: 
     ctrl.confirm_resumed(adapter.resume(target))
     visited.append(ctrl.state.value)
     return visited
+
+
+def record(checks: dict[str, bool], name: str, ok: Any) -> None:
+    """Store a check *and* print it now.
+
+    The end-of-run summary is the nice version, but a failure part-way through
+    would otherwise show nothing at all -- and every scenario before the failure
+    has already produced a result worth seeing.
+    """
+    checks[name] = bool(ok)
+    print(f"  [{'PASS' if bool(ok) else 'FAIL'}] {name}")
 
 
 def tail(path: Path, lines: int = 10) -> str:
@@ -434,11 +454,14 @@ def main() -> int:
                 inflight.get("error") or inflight.get("finish_reason") or "unknown"
             ),
         }
-        checks["A_drain_failed_with_DrainFailedError"] = drain_error is not None
-        checks["A_drain_failure_does_not_taint"] = not ctrl.is_tainted
-        checks["A_state_stays_DRAINING"] = ctrl.state is LifecycleState.DRAINING
-        checks["A_stragglers_were_aborted"] = detail["drain_failure"]["abort_requests_posted"] >= 1
-
+        record(checks, "A_drain_failed_with_DrainFailedError", drain_error is not None)
+        record(checks, "A_drain_failure_does_not_taint", not ctrl.is_tainted)
+        record(checks, "A_state_stays_DRAINING", ctrl.state is LifecycleState.DRAINING)
+        record(
+            checks,
+            "A_stragglers_were_aborted",
+            detail["drain_failure"]["abort_requests_posted"] >= 1,
+        )
         # Recovery, without restarting anything. Same driver (its NCCL session with
         # the engine is still live); a fresh adapter with a real timeout.
         adapter_ok = make_adapter(driver, drain_timeout=600.0)
@@ -454,10 +477,9 @@ def main() -> int:
             "tainted": ctrl.is_tainted,
             "text": after_text,
         }
-        checks["A_recovery_reaches_READY"] = ctrl.state is LifecycleState.READY
-        checks["A_recovery_installs_the_update"] = ctrl.current_version.label == "rc-1"
-        checks["A_recovery_serves"] = after_text.startswith(" the capital")
-
+        record(checks, "A_recovery_reaches_READY", ctrl.state is LifecycleState.READY)
+        record(checks, "A_recovery_installs_the_update", ctrl.current_version.label == "rc-1")
+        record(checks, "A_recovery_serves", after_text.startswith(" the capital"))
         # ========================================== B. identity mismatch
         print("\n--- B: an identity mismatch fails before mutating ---")
         # The trainer holds opt-125m. This driver holds a different manifest, which
@@ -509,12 +531,13 @@ def main() -> int:
             "start_weight_update_posts_this_attempt": starts_after - starts_before,
             "fresh_controller_bootstrap": handback,
         }
-        checks["B_mismatch_raises_WeightIdentityMismatchError"] = mismatch_error is not None
-        checks["B_nothing_was_written"] = starts_after - starts_before == 0
-        checks["B_engine_still_paused"] = detail["identity_mismatch"]["engine_paused"] is True
-        checks["B_engine_label_unchanged"] = weight_info() == "rc-1"
-        checks["B_no_taint"] = not ctrl.is_tainted
-
+        record(checks, "B_mismatch_raises_WeightIdentityMismatchError", mismatch_error is not None)
+        record(checks, "B_nothing_was_written", starts_after - starts_before == 0)
+        record(
+            checks, "B_engine_still_paused", detail["identity_mismatch"]["engine_paused"] is True
+        )
+        record(checks, "B_engine_label_unchanged", weight_info() == "rc-1")
+        record(checks, "B_no_taint", not ctrl.is_tainted)
         # The engine itself is fine: raw /resume puts it back in service.
         post(f"{BASE_URL}/resume", timeout=60)
         detail["identity_mismatch"]["resumed_by_hand"] = not is_paused()
@@ -577,13 +600,16 @@ def main() -> int:
             "second_cycle": refused,
             "second_cycle_seconds": refusal_seconds,
         }
-        checks["C_drain_path_surfaces_a_failure"] = drain_path_error is not None
-        checks["C_nothing_was_committed"] = detail["engine_death"]["drain_path_committed"] == "rc-0"
-        checks["C_bootstrap_on_a_dead_engine_taints"] = ctrl6.is_tainted
-        checks["C_taint_has_a_reason"] = bool(ctrl6.taint_reason)
-        checks["C_taint_is_terminal"] = bool(refused and "IllegalTransition" in refused)
-        checks["C_refusal_is_local"] = refusal_seconds < 0.05
-
+        record(checks, "C_drain_path_surfaces_a_failure", drain_path_error is not None)
+        record(
+            checks,
+            "C_nothing_was_committed",
+            detail["engine_death"]["drain_path_committed"] == "rc-0",
+        )
+        record(checks, "C_bootstrap_on_a_dead_engine_taints", ctrl6.is_tainted)
+        record(checks, "C_taint_has_a_reason", bool(ctrl6.taint_reason))
+        record(checks, "C_taint_is_terminal", bool(refused and "IllegalTransition" in refused))
+        record(checks, "C_refusal_is_local", refusal_seconds < 0.05)
         # ===================================== D. recovery is a fresh process
         print("\n--- D: recovery is a fresh engine and a fresh controller ---")
         server = start_vllm_server(LOG_3)
@@ -597,16 +623,13 @@ def main() -> int:
             "text": recovered_text,
             "prev_controller_still_tainted": ctrl6.is_tainted,
         }
-        checks["D_fresh_controller_bootstraps"] = ctrl5.state is LifecycleState.READY
-        checks["D_fresh_engine_is_rc0"] = weight_info() == "rc-0"
-        checks["D_it_serves"] = bool(recovered_text)
-
+        record(checks, "D_fresh_controller_bootstraps", ctrl5.state is LifecycleState.READY)
+        record(checks, "D_fresh_engine_is_rc0", weight_info() == "rc-0")
+        record(checks, "D_it_serves", bool(recovered_text))
         report["checks"] = checks
         report["ok"] = all(checks.values())
 
         print("\n=== Phase 4B ===")
-        for name, ok in checks.items():
-            print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
         print(f"  A drain error  : {detail['drain_failure']['error']}")
         print(f"  A in-flight    : {detail['drain_failure']['inflight_outcome']}")
         print(f"  B mismatch     : {detail['identity_mismatch']['error']}")
@@ -621,12 +644,17 @@ def main() -> int:
         print(f"  C taint reason : {detail['engine_death']['taint_reason']}")
         print(f"  C retry        : {detail['engine_death']['second_cycle']}")
         print(f"  D fresh label  : {detail['fresh_recovery']['engine_label']}")
-        print(f"  RESULT: {'PASS' if report['ok'] else 'FAIL'}")
+        print(
+            f"  RESULT: {'PASS' if report['ok'] else 'FAIL'} "
+            f"({sum(checks.values())}/{len(checks)} checks)"
+        )
         return 0 if report["ok"] else 1
     except Exception as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
         print(f"[error] {report['error']}")
-        print(f"[server] last lines:\n{tail(LOG_1)}")
+        for log_path in (LOG_1, LOG_2, LOG_3):
+            if log_path.exists():
+                print(f"[server] {log_path.name}, last lines:\n{tail(log_path)}")
         return 1
     finally:
         report["detail"] = detail

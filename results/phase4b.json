@@ -1,0 +1,42 @@
+{
+  "phase": "4B",
+  "model": "facebook/opt-125m",
+  "ok": false,
+  "started_at": "2026-09-24T16:04:50+00:00",
+  "rolloutcore_sha": "47856fc554db4703a41d2e0ab35c4f9247c888a6",
+  "rolloutcore_dirty": false,
+  "vllm_version": "0.30.1rc1.dev60+g00b7847c8",
+  "error": "IllegalTransitionError: [T-ILLEGAL] event 'confirm_drained' is not legal from state READY",
+  "detail": {
+    "drain_failure": {
+      "error": "drain did not complete after 1 attempt(s); last error: timed out. The engine remains paused; resuming is an operator decision.",
+      "state": "DRAINING",
+      "tainted": false,
+      "abort_requests_posted": 1,
+      "inflight_outcome": "abort"
+    },
+    "recovery": {
+      "drain_polls": 2,
+      "states": [
+        "QUIESCED",
+        "INVALIDATING",
+        "VALIDATING",
+        "RESUMING",
+        "READY"
+      ],
+      "committed": "rc-1",
+      "engine_label": "rc-1",
+      "tainted": false,
+      "text": " the capital of the French Republic.\n\nThe capital of France is the capital"
+    }
+  },
+  "checks": {
+    "A_drain_failed_with_DrainFailedError": true,
+    "A_drain_failure_does_not_taint": true,
+    "A_state_stays_DRAINING": true,
+    "A_stragglers_were_aborted": true,
+    "A_recovery_reaches_READY": true,
+    "A_recovery_installs_the_update": true,
+    "A_recovery_serves": true
+  }
+}
