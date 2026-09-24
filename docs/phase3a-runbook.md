@@ -56,11 +56,25 @@ git push origin main
 
 | Setting | Value | Why |
 |---|---|---|
-| GPUs | **1×** RTX 4090 / L40S / A6000 / A100 (≥16 GB) | `opt-125m` needs ~1 GB; the harness is not compute-bound |
-| Image | **`vllm/vllm-openai:<tag>`** if your provider allows a custom image (then skip step 3 entirely), else any CUDA 12.9/13.0 image | vLLM + torch + CUDA arrive pre-matched; a `-devel` image is only needed for a source build |
-| Disk | ≥ 40 GB | model + torch + vLLM |
-| Volume | mount a persistent volume at `/workspace` and set `HF_HOME=/workspace/hf` | avoids re-downloading the model after a restart |
-| Expose | nothing | everything runs inside the pod over `127.0.0.1` |
+| GPUs | **1×** RTX 4090 / L40S / A6000 / A100 (≥16 GB) — whichever is available | `opt-125m` needs ~1 GB; the harness is not compute-bound, so the GPU class is irrelevant to the result |
+| Image | any recent **Ubuntu 24.04 + CUDA 12.8+** template, e.g. `runpod/pytorch:*-cu1281-torch280-ubuntu2404` | see the note below on why the template's torch version does not matter |
+| Container disk | ≥ 50 GB (100 GB is fine) | image ~15 GB + model + pip/uv cache |
+| Volume | **optional for a single 3A sitting** (RunPod's "nothing mounted" notice is a warning, not a blocker). Add one, mounted at `/workspace`, only if you may restart the pod or are continuing straight into 3B | keeps the vLLM install (~10 GB) and the HF cache across a restart; costs ~$0.07/GB/month whether or not the pod runs |
+| Env var | `HF_HOME=/workspace/hf` **only if you mounted a volume** | so the model lands on the volume, not the ephemeral container |
+| Exposed ports | `8888` (Jupyter) and `22` (SSH) only | **never expose 8000** — `/pause`, `/update_weight_version` and `/reset_*` are unauthenticated destructive controls |
+| UDP | off | unused |
+
+**The template's PyTorch version does not matter.** vLLM pins `torch==2.13.0`
+(`requirements/cuda.txt:7`) and the wheel carries its own CUDA runtime, so
+installing vLLM into a venv replaces whatever the image shipped. What matters is
+the **host driver**, which `nvidia-smi` reports — that is what decides between
+`cu129` and `cu130`.
+
+**Don't bother with `vllm/vllm-openai` on RunPod** unless you are comfortable
+overriding the container start command: its entrypoint launches the API server
+itself, which fights the Jupyter/SSH setup a RunPod template gives you for free.
+Installing vLLM into the RunPod image with `uv` (step 3, Option A) is *less*
+work, not more.
 
 ### What the pinned commit actually requires
 
@@ -218,14 +232,19 @@ in-process engine path rejects `mode="wait"` outright
 mode RolloutCore accepts — `mode="keep"` lets one response span two weight
 versions.
 
-Manual start (useful for the first run; `--launch` in step 6 does this for you):
+Manual start (useful for the first run; `--launch` in step 6 does this for you).
+Run it under `tmux` — a web terminal disconnect should not kill the server, and
+`--launch` mode needs no second shell at all:
 
 ```bash
+tmux new -s vllm
+export HF_HOME=/workspace/hf
 vllm serve facebook/opt-125m \
     --host 127.0.0.1 --port 8000 \
     --enforce-eager \
     --max-model-len 512 \
     --gpu-memory-utilization 0.6
+# Ctrl-b d to detach; `tmux attach -t vllm` to return
 ```
 
 Quick manual pre-check in a second shell:
@@ -326,6 +345,11 @@ git add -f results/phase3a.json
 Download `phase3a-results.tgz` (RunPod file browser, `scp`, or `runpodctl`), then
 **stop the pod.** Phase 3A needs one GPU for under an hour; there is no reason to
 keep paying while the results are reviewed.
+
+Without a volume: **nothing on the pod survives `Stop`** (the container disk is
+erased), so pull `results/phase3a.json` *before* stopping — step 7 does exactly
+that. Re-running later costs a fresh `uv pip install` (~5 min) and a 250 MB model
+download.
 
 **Checkpoint CP6 — stop here.** Send back:
 
