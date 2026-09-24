@@ -29,6 +29,43 @@ should mean the benchmark failed and nothing else. Under the corrected harness t
 ten remaining checks all pass; `results/phase6-8b.json` is the clean 6/6 run with
 `--skip-deep-kill`.
 
+## The environment these numbers came from
+
+An 8B transfer time is not interpretable without the fabric it ran over, and the
+committed artifacts record the software flags and the vLLM/RolloutCore revisions
+but **not** the driver, CUDA, NCCL or the topology. This section is assembled from
+what the pod and the earlier runs do say; it states plainly what was never
+captured rather than filling the gap in.
+
+| | |
+|---|---|
+| GPUs | 2× NVIDIA GeForce RTX 3090, 24 GB each (GA102, compute capability 8.6) |
+| Interconnect | PCIe, with **P2P disabled by topology** and no NVLink bridge in play |
+| NCCL transport observed | `SHM/direct/direct` — or `NET/Socket/0` with `NCCL_SHM_DISABLE=1` (runbook §11) |
+| Driver / CUDA | 595.71.05 / 13.2 (`docs/phase3c-results.md`; `docs/phase3b-runbook.md`) |
+| torch / NCCL library | **not captured** in the Phase 6 artifacts — the harness now records both |
+| Server | TP=1 on GPU 0, `--load-format dummy`, prefix caching on (default) |
+| Trainer | bf16 full checkpoint on GPU 1 |
+| vLLM | `0.30.1rc1.dev60+g00b7847c8` = `00b7847c8036b667742b4efb21aab1de51fd4721` |
+| RolloutCore | each artifact's own `rolloutcore_sha` (all clean trees) |
+
+**What this means for the numbers.** The 8B cycle's 4.1287 s of `UPDATING` moves
+roughly 16 GB of bf16 weights — about **3.9 GB/s effective** — over a
+host-mediated path, because P2P is off and NCCL is using the shared-memory
+transport. That is a property of *this* fabric. On NVLink, or with P2P enabled
+across a wider PCIe topology, the transfer term would be smaller, so the hot cycle
+would shrink and the speedup ratio would move; which way depends on how much of
+the restart's ~30 s is fabric-independent (most of it is — engine startup). The
+125M numbers are far less fabric-sensitive: 0.1008 s of transfer against the same
+~30 s baseline.
+
+The harness now records all of it, before the server starts, in
+`detail["environment"]`: `gpu_names`, `gpu_memory_mib`, `gpu_driver`,
+`gpu_compute_capability`, `torch`, `cuda`, `nccl`, `p2p_peer_access` (per device
+pair, from `torch.cuda.can_device_access_peer`) and the raw `nvidia-smi topo -m`.
+The committed artifacts predate that, so this table is the retrospective; the next
+run's artifact is self-describing.
+
 ---
 
 ## The three lifetimes

@@ -21,11 +21,14 @@ Two properties are the point of it:
   admitted. The binding is RolloutCore's own bookkeeping, so on its own it cannot
   be evidence about the engine.
 
-The engine's label *at completion* is recorded too, and is deliberately **not**
-required to match. Phase 4A ran a rollout that was admitted at ``rc-0`` and
-finished after the update to ``rc-1``; the engine then reports ``rc-1`` for a
-request whose tokens were produced entirely by ``rc-0``. That divergence is the
-reason a trajectory carries the binding rather than the engine's last word.
+The engine's label *at completion* is recorded too -- read when the request
+completes, not after the cycle -- and under RolloutCore's drain it must equal the
+bound version. :attr:`~Trajectory.spans_an_update` is the detector for that:
+``True`` would mean the mutation landed while the rollout was live, which
+invariant I2 forbids. It is recorded rather than assumed because the engine gives
+no per-request binding of its own (PR #49040 removed one deliberately, since a
+request *may* span versions on the ``mode="keep"`` path), so a record carrying
+only the engine's label could not tell those two situations apart.
 """
 
 from __future__ import annotations
@@ -101,8 +104,9 @@ class Trajectory:
     #: observation was not taken, which makes :attr:`admission_agrees` unknown
     #: rather than true.
     engine_version_at_admission: str | None = None
-    #: What the engine reported once the rollout finished. Expected to differ from
-    #: :attr:`version` for a rollout that spanned an update -- see the module docs.
+    #: What the engine reported when the rollout finished -- read at completion,
+    #: not after the cycle. Under the drain it equals :attr:`version`; a difference
+    #: is the violation :attr:`spans_an_update` detects. See the module docs.
     engine_version_at_completion: str | None = None
 
     def __post_init__(self) -> None:
@@ -176,7 +180,15 @@ class Trajectory:
 
     @property
     def spans_an_update(self) -> bool:
-        """Did the engine's label change under this rollout?"""
+        """Did the engine's label change under this rollout?
+
+        A **detector, not an expectation**. RolloutCore's drain holds the mutation
+        until every admitted rollout has returned, so this must be ``False`` in a
+        correct cycle; ``True`` means a mutation landed while this rollout was
+        live -- the state invariant I2 forbids. The record is still correct about
+        which weights produced the tokens either way, because it carries the
+        binding rather than the engine's last word.
+        """
         if self.engine_version_at_completion is None:
             return False
         return self.engine_version_at_completion != self.version

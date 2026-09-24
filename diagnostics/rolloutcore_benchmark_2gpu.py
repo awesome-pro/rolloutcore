@@ -37,8 +37,10 @@ the transfer thread is still blocked.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import platform
 import signal
 import subprocess
 import sys
@@ -274,6 +276,83 @@ def vllm_version() -> str:
         return "unknown"
 
 
+def _run_text(cmd: list[str], timeout: float = 10.0) -> str | None:
+    """Best-effort command output for the environment block; never raises."""
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (done.stdout or "").strip()
+    return text or None
+
+
+def environment() -> dict[str, Any]:
+    """What this measurement ran on, so a transfer time can be interpreted.
+
+    An 8B broadcast takes a very different time over NVLink, PCIe P2P, and a
+    host/shared-memory path, so `detail["hot"]` is not portable without this
+    block. Two fields carry most of the weight: `p2p_peer_access` (whether the
+    devices can reach each other directly at all) and `topology`
+    (`nvidia-smi topo -m`, the fabric as the driver sees it). On the pod used for
+    the committed artifacts P2P is *disabled by topology*, and the transport line
+    reports `SHM/direct/direct` -- which is why the 4.13 s 8B broadcast is a
+    host-path number, not an interconnect number.
+
+    Every probe is best-effort: a machine without `nvidia-smi`, or without CUDA,
+    leaves a key ``None`` rather than failing the run that is measuring something
+    else.
+    """
+    info: dict[str, Any] = {
+        "host": platform.node(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "gpu_count": None,
+        "gpu_names": None,
+        "gpu_memory_mib": None,
+        "gpu_driver": None,
+        "gpu_compute_capability": None,
+        "torch": getattr(torch, "__version__", None),
+        "cuda": getattr(getattr(torch, "version", None), "cuda", None),
+        "nccl": None,
+        "p2p_peer_access": None,
+        "topology": _run_text(["nvidia-smi", "topo", "-m"]),
+    }
+    with contextlib.suppress(Exception):
+        raw = torch.cuda.nccl.version()
+        info["nccl"] = (
+            ".".join(str(part) for part in raw) if isinstance(raw, (tuple, list)) else str(raw)
+        )
+    query = _run_text(
+        [
+            "nvidia-smi",
+            "--query-gpu=name,memory.total,driver_version,compute_cap",
+            "--format=csv,noheader",
+        ]
+    )
+    if query:
+        rows = [line.split(", ") for line in query.splitlines() if line.strip()]
+        info["gpu_count"] = len(rows)
+        info["gpu_names"] = [row[0] for row in rows if row]
+        info["gpu_memory_mib"] = [row[1] for row in rows if len(row) > 1]
+        info["gpu_driver"] = rows[0][2] if len(rows[0]) > 2 else None
+        info["gpu_compute_capability"] = rows[0][3] if len(rows[0]) > 3 else None
+    try:
+        count = torch.cuda.device_count()
+    except Exception:
+        count = 0
+    if info["gpu_count"] is None:
+        info["gpu_count"] = count
+    if count >= 2:
+        with contextlib.suppress(Exception):
+            info["p2p_peer_access"] = {
+                f"{i}->{j}": bool(torch.cuda.can_device_access_peer(i, j))
+                for i in range(count)
+                for j in range(count)
+                if i != j
+            }
+    return info
+
+
 def _safe_weight_info() -> str:
     """The engine label, or a note if it cannot answer -- it may be blocked."""
     try:
@@ -450,6 +529,15 @@ def main() -> int:
     report["rolloutcore_dirty"] = dirty
     checks: dict[str, bool] = {}
     detail: dict[str, Any] = {}
+    # Recorded before anything starts, so even a failed run carries the machine
+    # the number would have come from.
+    detail["environment"] = environment()
+    env = detail["environment"]
+    print(
+        f"[host] {env['gpu_count']}x {env['gpu_names']} driver {env['gpu_driver']} "
+        f"cuda {env['cuda']} nccl {env['nccl']} torch {env['torch']}"
+    )
+    print(f"[host] p2p {env['p2p_peer_access']}")
     print(f"[repo] rolloutcore {sha[:12]}{' (dirty)' if dirty else ''}")
 
     current: subprocess.Popen[str] | None = None

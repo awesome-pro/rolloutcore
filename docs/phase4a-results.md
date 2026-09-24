@@ -1,8 +1,9 @@
 # Phase 4A results — one version per rollout, under a live update
 
-**Result: PASS. 12/12 checks.** A 256-token generation was in flight when the
-weights changed under it, and it came out of the update on the version it was
-admitted to.
+**Result: PASS. 12/12 checks.** An update was requested while a 256-token
+generation was in flight, and RolloutCore **delayed the weight mutation until
+that generation had finished**. The generation came out on the version it was
+admitted to, and no rollout in this run ever saw two weight versions.
 
 | | |
 |---|---|
@@ -19,13 +20,27 @@ admitted to.
 ## Why this phase exists
 
 Phase 3C proved the cycle works. This asks the question the cycle exists for:
-**what happens to a rollout that is already generating when the weights change?**
+**what happens to a rollout that is already generating when an update is
+requested?**
 
 vLLM cannot answer that. PR #49040 added a `weight_version` query API and
 *deliberately removed* binding a version to a request — the engine hands you the
 label and declines to enforce anything with it (RFC #48306 §2.2). So "one version
-per rollout" is RolloutCore's guarantee or nobody's, and until this run it had
-never been tested against a live engine under real concurrency.
+per rollout" is RolloutCore's guarantee or nobody's, and this is the run that
+shows it holds against a live engine under real concurrency.
+
+**The guarantee, stated precisely — and it is a claim about *delay*, not about
+survival.** RolloutCore does not let a generation run across a mutation and hope
+it comes out intact. It refuses to mutate while the generation is alive:
+
+```
+update requested → drain → (the in-flight rollout finishes) → mutate → invalidate → resume
+```
+
+A rollout that *did* span a mutation would be a different, weaker design (vLLM's
+`mode="keep"` path, which RolloutCore deliberately cannot reach). The stronger
+claim is that the mutation never lands under a live request at all, and that is
+what the journal below shows.
 
 ## The setup, and why the text is the evidence
 
@@ -40,6 +55,12 @@ run_cycle(rc-1): DRAINING =====> /pause?mode=wait holds until R-long finishes
    -> RESUMING -> READY(rc-1)     -> admit R-2 -> binds rc-1
 ```
 
+The weight mutation happens in the `UPDATING` step, i.e. *after* R-long has
+returned; the drain is what stands between the two. What the run therefore
+measures is whether RolloutCore can hold an update off for as long as a real
+generation takes, and whether the generation's output is consistent with the
+version it was admitted to.
+
 The server runs `--load-format dummy`, so `rc-0` output is degenerate. The update
 installs `opt-125m`'s real weights, whose output for this prompt is coherent and
 was measured in Phase 3A. The two are impossible to confuse, which makes the text
@@ -47,15 +68,17 @@ itself the evidence:
 
 ```
 rc-0 baseline : '<s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s>'
-in-flight     : '<s>' x 256          <- finished AFTER the update, still rc-0
+in-flight     : '<s>' x 256          <- 256 tokens, all produced at rc-0
 rc-1 after    : ' the capital of the French Republic.\n\n...'
 ```
 
 `chars_matching_baseline_prefix: 48` out of `baseline_prefix_chars: 48` — the
-whole 16-token baseline. A generation that ends after the update but reproduces
-the pre-update prefix, token for token, is one that ran on the old weights
+whole 16-token baseline. A 256-token generation whose prefix reproduces the
+pre-update baseline, token for token, is one that ran on the old weights
 throughout. `ignore_eos` forces the 256 tokens exactly, so the request could not
-finish early and quietly stop overlapping.
+finish early and quietly stop overlapping the cycle.
+
+The in-flight record's own field says the same thing: `released_version: "rc-0"`.
 
 ## The journal is the mechanism
 
@@ -65,12 +88,24 @@ confirm_drained, begin_update, confirm_updated, confirm_invalidated,
 confirm_validated, confirm_resumed, admit_rollout(R-2), finish_rollout
 ```
 
-`finish_rollout` lands **between** `begin_drain` and `confirm_drained`. That is the
-interleaving the invariant requires: the engine's own drain reports "quiescent"
-only once the request is done, and RolloutCore must already agree with that. Had
-the release come after `confirm_drained`, the controller would have tainted
+`finish_rollout` lands **between** `begin_drain` and `confirm_drained`, and
+`begin_update` comes after both. That is the ordering the invariant requires: the
+engine's drain reports "quiescent" only once the request is done, RolloutCore must
+already agree with that, and only then is the mutation allowed to start. Had the
+release come after `confirm_drained`, the controller would have tainted
 (`lifecycle.py:465-472`) — the engine claiming quiescence while RolloutCore still
 counted live work.
+
+The honest reading of this journal is worth stating, because an earlier version of
+this document read it the other way: **the rollout did not span the mutation.** It
+spanned the *drain*. The mutation was held off until it was gone.
+
+The committed artifact's check `inflight_overlapped_update` predates this reading.
+It asserts `cycle_started < request_ended`, i.e. that the request was still running
+when the *cycle* began — the precondition for the experiment, not a claim about
+the mutation. The harness now names it `inflight_overlapped_the_cycle`; as with
+Phase 5's completion label, the artifact is left as measured and the rename is
+recorded here.
 
 ## Measurements
 
@@ -110,10 +145,17 @@ the harness was written:
 
 ## What Phase 4A does *not* prove
 
-- **Not the cache lane.** This shows no rollout *saw* two versions. It says nothing
-  about cross-version KV reuse: the drain resets the prefix cache, but a
-  prefix-cache experiment (populate at `rc-0`, update, re-request) is a separate
-  measurement, and it needs prefix-cache hit metrics to be meaningful.
+- **Not the cache lane.** This shows no rollout *saw* two versions; it says
+  nothing about cross-version KV reuse. The cycle does invalidate
+  (`INVALIDATING`, after the mutation), and a prefix-cache experiment
+  (populate at `rc-0`, update, re-request) is a separate measurement — Phase 4C,
+  which needed the prefix-cache hit metrics to be meaningful.
+- **It does not show a rollout surviving a mutation**, because by design none
+  does. The record type can represent that case (`spans_an_update`), and a
+  synthetic record exercises it, but no GPU run here produced one: producing one
+  would require the `mode="keep"` path RolloutCore forbids.
+- **The delay was 1.375 s.** A generation long enough to outlast a configured
+  drain timeout is a different scenario (Phase 4B's failed-drain case).
 - **Two GPUs, one node, one prompt.** No multi-node, no batching pressure, no
   multimodal encoder lane.
 - **Not a benchmark.** `opt-125m` at TP=1, one cycle, one rollout. The timings

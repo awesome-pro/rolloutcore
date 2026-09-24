@@ -112,9 +112,9 @@ affecting the verdict above:
    NCCL rendezvous is sized `1 + get_world_size()` (`examples/rl/rlhf_http_nccl.py:177-179`)
    — so it should be recorded unconditionally.
 2. **`rolloutcore_dirty: true` over-reports.** The tree had no modified tracked
-   files; the flag was tripped by an untracked `REVIEW.md`. `git status
-   --porcelain` should be run with `--untracked-files=no`, or the untracked set
-   recorded separately.
+   files; the flag was tripped by an untracked scratch file at the repo root.
+   `git status --porcelain` should be run with `--untracked-files=no`, or the
+   untracked set recorded separately.
 
 And three observations that inform Phase 3B and Phase 6:
 

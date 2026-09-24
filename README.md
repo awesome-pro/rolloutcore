@@ -18,8 +18,9 @@ weight source that produced it.
 > **Phase 3A passed** — 16/16 control-plane checks against a real `vllm serve`
 > (`docs/phase3a-results.md`); **Phase 3C passed** — real weights broadcast over
 > NCCL and the whole update driven through `LifecycleRunner.run_cycle()`
-> (`docs/phase3c-results.md`); **Phase 4A passed** — 12/12, a generation spanned
-> the update and stayed on the version it was admitted to; **Phase 4B passed** —
+> (`docs/phase3c-results.md`); **Phase 4A passed** — 12/12, an update requested
+> while a 256-token generation was in flight was held off for 1.375 s until the
+> generation finished, so no rollout saw two versions; **Phase 4B passed** —
 > 21/21 failure paths over three engine lifetimes; **Phase 4C passed** — 8/8, no
 > cross-version KV reuse, with a negative control that makes the reuse happen;
 > **Phase 4D passed** — 8/8, a SIGKILL mid-update detected in 0.177 s and
@@ -150,7 +151,7 @@ The sibling checkout `vendor/vllm` is a stale fork (`d90f0eade5`) and was not
 used. The worktree is a shallow clone (depth 1), so **"NOT PRESENT" means absent
 at this commit, not never existed**. `scripts/verify_anchors.py` re-derives every
 backticked `file.py:LINE` claim from the checkout **and** from this repository:
-**561 anchors resolve to real files with in-range line numbers, 0 unresolved**
+**557 anchors resolve to real files with in-range line numbers, 0 unresolved**
 (36 of them via a basename that appears in several directories, so the line was
 checked against each candidate).
 

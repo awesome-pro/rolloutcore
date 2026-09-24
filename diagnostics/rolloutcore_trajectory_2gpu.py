@@ -7,22 +7,27 @@ can **re-declare** its provenance (`NCCLWeightTransferDriver.declare`, because a
 cached identity cannot follow weights that changed), and a record type that binds
 a rollout's output to that identity (`rolloutcore.trajectory`).
 
-The experiment is Phase 4A's, with the provenance added, because 4A produced the
-case that makes the whole design necessary: a rollout admitted at ``rc-0`` that
-finishes *after* the update to ``rc-1``. The engine then reports ``rc-1`` for a
-request whose tokens came entirely from ``rc-0``. A trajectory that recorded the
-engine's last word would be wrong about which weights produced it; one that
-records the binding is not.
+The experiment is Phase 4A's, with the provenance added. Two weight sets share the
+manifest digest ``925369d663bc`` -- Phase 3C measured that for dummy and real
+weights, Phase 4C for a corrupted checkpoint -- so a manifest-only identity cannot
+separate them, and nothing in the engine binds a version to a request either
+(PR #49040 removed that deliberately). The record has to carry both, and this run
+shows it doing so for the one case where the two weight sets are both live:
 
-So the run asserts the divergence on purpose:
-
-* ``R-long`` is bound to step 0 and its tokens are the degenerate ``<s>`` output of
-  dummy weights -- while the engine says ``rc-1`` by the time it finished;
+* ``R-long`` is admitted at ``rc-0`` while an update to ``rc-1`` is requested. The
+  drain holds the mutation until the request returns, so the engine's label **at
+  the request's completion is still ``rc-0``** -- and this harness reads it there,
+  in the request thread, before releasing the rollout;
 * ``R2`` is admitted afterwards and is bound to step 1;
-* both carry ``exactness == "declared-source"``, and both survive a JSONL round
-  trip. **A manifest-only identity would identify neither**, which is what
-  Phase 3C measured (the same digest for dummy and real weights) and Phase 4C
-  confirmed (the same digest for a corrupted checkpoint).
+* both carry ``exactness == "declared-source"`` and both survive a JSONL round trip.
+
+``spans_an_update`` is the **detector** for the guarantee, not an expected event:
+it is ``False`` here, and ``True`` would mean the mutation landed while the rollout
+was live -- the condition the drain exists to prevent. The field is read at the
+request's own completion on purpose. An earlier version of this harness read the
+label after the whole cycle, which records the *post*-update label and makes the
+record say the opposite of what happened (see the defect note in
+`docs/phase5-results.md`).
 
 The provenance is **declared**, which is the honest word for it: the harness
 states "step 0" and "step 1" for two weight sets; nothing here verifies any byte.
@@ -342,7 +347,7 @@ def main() -> int:
         baseline = generate()
         print(f"[rc-0] baseline {baseline['text']!r}")
 
-        # ---- the rollout that spans the update ---------------------------
+        # ---- the rollout that is in flight when the update is requested -----
         binding_long = ctrl.admit_rollout("R-long")
         admission_label = weight_info()
         detail["inflight_binding"] = {
@@ -357,15 +362,26 @@ def main() -> int:
         outcome: dict[str, Any] = {}
 
         def long_rollout() -> None:
-            """Own the request, and release the rollout the instant it returns.
+            """Own the request; capture the label at completion; then release.
+
+            The engine's label is read *here*, between the response arriving and
+            the release, because that is the only moment at which it is known to
+            be the label the request completed under. The drain cannot confirm
+            -- and so the update cannot begin -- while RolloutCore still counts
+            the rollout, and this thread is the only thing that releases it.
+            Reading it after the cycle instead records whatever the engine says
+            once the update has landed (what this harness used to do).
 
             The release comes before the body is parsed on purpose: the engine
             reports itself drained within milliseconds of finishing, and
             `confirm_drained` taints if RolloutCore still counts it.
             """
+            started = time.monotonic()
             try:
                 req = completion_request(LONG_TOKENS, ignore_eos=True)
                 with urllib.request.urlopen(req, timeout=600) as resp:
+                    outcome["seconds"] = round(time.monotonic() - started, 4)
+                    outcome["engine_version_at_completion"] = weight_info()
                     released = ctrl.finish_rollout("R-long")
                     outcome["released_version"] = released.version.label
                     payload = json.loads(resp.read().decode("utf-8"))
@@ -403,8 +419,10 @@ def main() -> int:
         print(f"[rc-1] after {after['text']!r}")
 
         # ---- the records --------------------------------------------------
-        # Assembled after the cycle so the engine label is deterministic rather
-        # than whatever it happened to be mid-update.
+        # Assembled after the cycle for a deterministic *binding*, but every
+        # engine-side observation comes from `outcome`, captured at the request's
+        # own completion. `after["weight_version"]` is the post-cycle label and
+        # must not be used as "at completion".
         long_trajectory = recorder.record(
             Trajectory(
                 binding=binding_long,
@@ -412,8 +430,9 @@ def main() -> int:
                 text=str(outcome.get("text", "")),
                 token_ids=tuple(outcome.get("token_ids") or ()),
                 finish_reason=outcome.get("finish_reason"),
+                seconds=outcome.get("seconds"),
                 engine_version_at_admission=admission_label,
-                engine_version_at_completion=after["weight_version"],
+                engine_version_at_completion=outcome.get("engine_version_at_completion"),
             )
         )
 
@@ -447,10 +466,15 @@ def main() -> int:
             "inflight_bound_to_step_0",
             long_trajectory.version == "rc-0" and long_trajectory.identity == identity_v0,
         )
+        # The detector, not an expected event: `spans_an_update is True` would mean
+        # the mutation landed while R-long was live -- the condition the drain
+        # exists to prevent (invariant I2). The label is the one captured in the
+        # request thread at completion.
         record(
             checks,
-            "inflight_engine_reported_a_different_version_at_completion",
-            long_trajectory.spans_an_update is True,
+            "inflight_engine_reported_the_bound_version_at_completion",
+            long_trajectory.spans_an_update is False
+            and long_trajectory.engine_version_at_completion == long_trajectory.version,
         )
         record(
             checks,
@@ -490,7 +514,8 @@ def main() -> int:
         print(f"  step 1 : {identity_v1.describe()}")
         print(
             f"  R-long : bound {long_trajectory.version}, engine said "
-            f"{long_trajectory.engine_version_at_completion} at completion"
+            f"{long_trajectory.engine_version_at_completion} at completion "
+            f"(spans_an_update={long_trajectory.spans_an_update})"
         )
         print(f"  R2     : bound {r2_trajectory.version}")
         print(f"  file   : {written}")

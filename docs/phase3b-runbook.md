@@ -266,7 +266,8 @@ results/phase3c-server.log` shows what the server is actually doing.
 ## 7. Phase 4A — one version per rollout, under a live update
 
 Phase 3C proved the cycle works. Phase 4A asks the question the cycle exists for:
-**what happens to a rollout that is already generating when the weights change?**
+**what happens to a rollout that is already generating when an update is
+requested?**
 
 vLLM cannot answer that itself. PR #49040 added a `weight_version` query API and
 deliberately *removed* binding a version to a request, because one request may
@@ -279,19 +280,20 @@ python3 diagnostics/rolloutcore_concurrency_2gpu.py
 ```
 
 One 256-token generation (`ignore_eos`, so it cannot finish early) is admitted at
-`rc-0`; 0.4 s later the cycle to `rc-1` starts; the drain has to wait for it.
+`rc-0`; 0.4 s later the cycle to `rc-1` starts; the drain has to wait for it, and
+the weight mutation happens only after it returns.
 
 **Why the text is the evidence.** The server runs `--load-format dummy`, so `rc-0`
 produces degenerate output. The update installs real `opt-125m` weights, whose
-output is coherent and was measured in Phase 3A. So a generation that *finishes
-after* the update, yet whose 16-token prefix matches the pre-update baseline, is
-one that ran entirely on the old weights. The two texts are impossible to confuse.
+output is coherent and was measured in Phase 3A. So a generation whose 16-token
+prefix matches the pre-update baseline is one that ran entirely on the old
+weights. The two texts are impossible to confuse.
 
 ```
 === Phase 4A ===
   [PASS] pre_update_binding_is_rc0
   [PASS] rollout_released_cleanly
-  [PASS] inflight_overlapped_update
+  [PASS] inflight_overlapped_the_cycle   (named ..._update in the committed artifact)
   [PASS] inflight_ran_to_length
   [PASS] inflight_used_rc0_weights
   [PASS] inflight_is_not_rc1
@@ -302,13 +304,15 @@ one that ran entirely on the old weights. The two texts are impossible to confus
   [PASS] engine_resumed
   [PASS] server_never_restarted
   rc-0 baseline : '<s><s><s>...'
-  in-flight     : '<s><s><s>...'      <- finished AFTER the update, still rc-0
+  in-flight     : '<s><s><s>...'      <- 256 tokens, all produced at rc-0
   rc-1 after    : ' the capital of the French Republic.\n\n...'
   timing        : request 2.1s, 1.6s of it under the cycle, cycle 2.4s over 2 poll(s)
 ```
 
 `inflight_used_rc0_weights` is the claim; `drain_outlasted_the_request` is why it
-held. If the drain had *not* waited, the request would have been aborted and
+held. The journal settles the ordering: `finish_rollout` comes **before**
+`begin_update`, so the rollout spanned the *drain*, not the mutation. If the drain
+had *not* waited, the request would have been aborted and
 `rollout_released_cleanly` / `inflight_ran_to_length` would fail instead.
 
 **If it reports a taint instead**, `DrainDisagreementError` means the engine said

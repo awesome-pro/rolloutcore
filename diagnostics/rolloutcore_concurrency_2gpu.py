@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Phase 4A: one version per rollout, while the weights change underneath it.
+"""Phase 4A: one version per rollout, while an update is requested underneath it.
 
 Phase 3C proved the cycle works. This proves the guarantee the cycle exists for,
 and it is the invariant with **no engine-side support** in vLLM `main`: PR #49040
@@ -10,16 +10,22 @@ spanning two weight versions except the component that refuses to let it happen.
     READY(rc-0) -> admit R-long -> start a 256-token generation
                 -> run_cycle(rc-1)          <- DRAINING waits for R-long
                 -> R-long completes, released from its own thread
-                -> QUIESCED -> ... -> READY(rc-1)
+                -> QUIESCED -> UPDATING (the mutation) -> ... -> READY(rc-1)
                 -> admit R-2 -> must be rc-1
 
-The claim under test: **the request that was in flight across the update
-generated with the pre-update weights.** Not "it probably did" -- the evidence is
-the text. The server runs `--load-format dummy`, whose output is degenerate, and
-the update installs `facebook/opt-125m`'s real weights, whose output for this
+The claim under test is about **delay, not survival**: the update is requested
+while a generation is live, and RolloutCore holds the mutation off until that
+generation is gone, so no rollout ever runs across a weight change. The evidence
+is the text. The server runs `--load-format dummy`, whose output is degenerate,
+and the update installs `facebook/opt-125m`'s real weights, whose output for this
 prompt is coherent and was measured in Phase 3A. The two are unmistakable, so a
-256-token generation that *finishes after* the update but whose 16-token prefix
-matches the pre-update baseline is a rollout that stayed on rc-0 throughout.
+256-token generation whose 16-token prefix matches the pre-update baseline is a
+rollout that ran on rc-0 throughout.
+
+(An earlier version of this docstring said the generation "finishes after the
+update". It does not: the journal shows ``finish_rollout`` before ``begin_update``.
+The rollout spans the *drain*, which is the point -- the corrected reading is in
+`docs/phase4a-results.md`.)
 
 Two subtleties this harness exists to expose, both found while writing it:
 
@@ -328,7 +334,7 @@ def main() -> int:
         print(f"[rc-0] baseline {baseline['text']!r}")
         report["baseline"] = baseline
 
-        # ---- the rollout that spans the update -------------------------
+        # ---- the rollout that is in flight when the update is requested --
         binding = ctrl.admit_rollout("R-long")
         report["pre_update_binding"] = {
             "request_id": binding.request_id,
@@ -432,7 +438,7 @@ def main() -> int:
         checks = {
             "pre_update_binding_is_rc0": binding.version.label == "rc-0",
             "rollout_released_cleanly": "error" not in outcome,
-            "inflight_overlapped_update": overlapped,
+            "inflight_overlapped_the_cycle": overlapped,
             "inflight_ran_to_length": report["inflight"]["finish_reason"] == "length",
             "inflight_used_rc0_weights": bool(inflight) and inflight.startswith(baseline["text"]),
             "inflight_is_not_rc1": bool(inflight) and not inflight.startswith(after["text"][:8]),
