@@ -8,9 +8,10 @@ Runs ``READY -> DRAINING -> QUIESCED -> UPDATING -> INVALIDATING -> VALIDATING
 distinguishable weight identities modelling the plan's Model A / Model B. Prints
 the engine calls made, the state journal, and the resulting rollout bindings.
 
-Then it demonstrates the two failure properties the design is built around:
-a failed update is never published, and a taint preserves the in-flight rollout
-bindings for forensics.
+Then it demonstrates the failure properties the design is built around: a
+failed update is never published, a taint preserves the in-flight rollout
+bindings for forensics, and a bootstrap that refuses an already-managed engine
+does so before writing anything.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from __future__ import annotations
 import sys
 
 from .adapters import FakeVLLMAdapter, FakeVLLMEngine, manifest_identity
-from .lifecycle import LifecycleController, RolloutBinding
+from .lifecycle import LifecycleController, LifecycleState, RolloutBinding
 from .runner import LifecycleRunner
 
 W = 78
@@ -198,6 +199,48 @@ def cache_invalidation_failure_path() -> None:
     print("\n  OK: tainted on the failed invalidation, nothing resumed.")
 
 
+def refused_bootstrap_path() -> None:
+    rule("5. A refused adoption leaves the other controller's engine untouched")
+
+    engine = FakeVLLMEngine()
+    engine.seed_fresh_with(manifest_identity("A"))
+    # A first controller already owns this engine and has driven it to rc-7.
+    engine.weight_version = "rc-7"
+    engine.calls.clear()
+    ctrl = LifecycleController()
+    runner = LifecycleRunner(ctrl, FakeVLLMAdapter(engine), sleep=lambda _s: None)
+
+    try:
+        runner.bootstrap()
+    except Exception as exc:
+        print(f"  bootstrap raised: {type(exc).__name__}")
+        print(f"                    {str(exc).splitlines()[0]}")
+
+    print(f"\n  controller state     : {ctrl.state.value}")
+    print(f"  engine weight_version: {engine.weight_version!r}  (unchanged)")
+    print(f"  engine calls         : {' -> '.join(engine.calls)}")
+    print("  => the refusal happens BEFORE the label write. Reading rc-7, writing")
+    print("     rc-0 and refusing afterwards would have corrupted the owner's")
+    print("     engine on the way out. Nothing was written, so this is retryable")
+    print("     rather than tainted: the engine is healthy, it is just not ours.")
+
+    assert ctrl.state is LifecycleState.UNINITIALIZED
+    assert engine.weight_version == "rc-7"
+    assert "update_weight_version" not in engine.calls
+    assert "init_weight_transfer_engine" not in engine.calls
+
+    # Once the owner releases it, the same controller can bootstrap normally.
+    engine.weight_version = "default"
+    runner.bootstrap()
+    print(f"\n  after release        : {engine.weight_version!r}, state={ctrl.state.value}")
+    # Compared by value: mypy narrows `ctrl.state` from the assert above and does
+    # not invalidate that narrowing across an opaque method call, so an `is`
+    # check here reads as a non-overlapping literal comparison.
+    assert ctrl.state.value == LifecycleState.READY.value
+    assert engine.weight_version == "rc-0"
+    print("\n  OK: refused without side effects, then adopted cleanly.")
+
+
 def main() -> int:
     print("=" * W)
     print("RolloutCore — lifecycle demo (fake engine, no GPU)".center(W))
@@ -206,6 +249,7 @@ def main() -> int:
     drain_disagreement_path()
     finalize_failure_path()
     cache_invalidation_failure_path()
+    refused_bootstrap_path()
     rule()
     print("All assertions held.")
     return 0

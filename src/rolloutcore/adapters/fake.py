@@ -8,6 +8,7 @@ protocol against a real ``vllm serve``.
 
 from __future__ import annotations
 
+from ..errors import AlreadyManagedEngineError
 from ..evidence import (
     BootstrapEvidence,
     DrainEvidence,
@@ -40,15 +41,29 @@ class FakeVLLMAdapter:
         self._chunks = chunks_per_update
         self._drain_completed = False
 
+    #: Reported in ``BootstrapEvidence.weight_transfer_driver``. The fake adapter
+    #: moves "tensors" in-process, which is why it can be used to test the whole
+    #: cycle while the HTTP adapter cannot yet.
+    driver_name = "fake-in-process"
+
     # ------------------------------------------------------------- the port
 
     def bootstrap(self) -> BootstrapEvidence:
+        """Bring a fresh, unmanaged engine under control.
+
+        Mirrors the HTTP adapter's ordering: the already-managed check happens
+        **before** any write, so a refused adoption leaves the engine exactly as
+        it was (review item 1). A lazy check would let this adapter seed ``rc-0``
+        over another controller's ``rc-7`` and only then refuse.
+        """
         identity = self.engine.weight_identity
         if identity is None:
             raise RuntimeError(
                 "fake engine has no weight identity; call engine.seed_fresh_with(...) first"
             )
         pre_seed = self.engine.get_weight_info()
+        if self.engine.is_managed():
+            raise AlreadyManagedEngineError(pre_seed)
 
         self.engine.init_weight_transfer_engine({"backend": self.engine.backend})
         # Bootstrap is the one sanctioned label write: seed rc-0 over an
@@ -62,6 +77,7 @@ class FakeVLLMAdapter:
             weight_identity=identity,
             backend=self.engine.backend,
             world_size=self.engine.get_world_size(),
+            weight_transfer_driver=self.driver_name,
         )
 
     def begin_drain(self) -> None:

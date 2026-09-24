@@ -608,13 +608,17 @@ class LifecycleController:
         self._current_target = pending
         self._pending_target = None
 
-    def taint(self, reason: str) -> None:
+    def taint(self, reason: str) -> EngineTaintedError:
         """Move to TAINTED from anywhere. Used for operator aborts and faults.
 
         Idempotent. TAINTED is absorbing: V1 never rolls back and never resumes.
         Active bindings are retained as orphans, not discarded.
+
+        Returns the error rather than ``None`` so callers that only have a
+        *reason* (the runner's effect wrapper) can ``raise ctrl.taint(...)`` and
+        give the caller a terminal, typed failure.
         """
-        self._taint(reason)
+        return self._taint(reason)
 
     # ------------------------------------------------------ rollout admission
 

@@ -10,9 +10,9 @@ controller.
 from __future__ import annotations
 
 import unittest
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, fields, replace
 
-from support import GOOD_BOOTSTRAP, IDENTITY_V0, TARGET_V1, target
+from support import GOOD_BOOTSTRAP, GOOD_BOOTSTRAP_NO_DRIVER, IDENTITY_V0, TARGET_V1, target
 
 from rolloutcore import (
     DrainEvidence,
@@ -20,6 +20,8 @@ from rolloutcore import (
     ResumeEvidence,
     UpdateEvidence,
     ValidateEvidence,
+    WeightIdentity,
+    WeightSource,
 )
 
 
@@ -29,7 +31,17 @@ class TestBootstrapEvidence(unittest.TestCase):
 
     def test_uninitialised_transfer_fails(self):
         ev = replace(GOOD_BOOTSTRAP, weight_transfer_initialised=False)
-        self.assertIn("not initialised", ev.failure_reason())
+        self.assertIn("uninitialised transfer engine", ev.failure_reason())
+
+    def test_control_plane_only_bootstrap_is_legal(self):
+        """Review item 2: a controller may bootstrap with no transfer path."""
+        self.assertIsNone(GOOD_BOOTSTRAP_NO_DRIVER.failure_reason())
+
+    def test_transfer_engine_without_a_driver_is_refused(self):
+        """If something initialized the engine, we must be able to name the driver."""
+        ev = replace(GOOD_BOOTSTRAP_NO_DRIVER, weight_transfer_initialised=True)
+        reason = ev.failure_reason()
+        self.assertIn("no driver", reason)
 
     def test_missing_pre_seed_label_is_refused(self):
         """Amendment 4: freshness cannot be proven without the pre-seed label."""
@@ -99,7 +111,20 @@ class TestUpdateEvidence(unittest.TestCase):
 
     def test_observed_identity_mismatch(self):
         reason = self._ev(observed_identity=IDENTITY_V0).failure_reason()
-        self.assertIn("identity", reason)
+        self.assertIn("staged weight source", reason)
+        self.assertIn("was the target", reason)
+
+    def test_provenance_mismatch_is_reported_with_its_source(self):
+        """Review item 4: the digest is checked *and* explained."""
+        staged = WeightIdentity.from_pairs(
+            [("a", "bfloat16", (2, 2))], source=WeightSource(step=100)
+        )
+        asked = WeightIdentity.from_pairs(
+            [("a", "bfloat16", (2, 2))], source=WeightSource(step=500)
+        )
+        reason = self._ev(observed_identity=staged, target=target(1, asked)).failure_reason()
+        self.assertIn("step=100", reason)
+        self.assertIn("step=500", reason)
 
     def test_unknown_observed_identity_is_tolerated(self):
         """Adapters that cannot read back an identity must not be blocked."""
@@ -193,14 +218,32 @@ class TestResumeEvidence(unittest.TestCase):
 
 class TestEvidenceImmutability(unittest.TestCase):
     def test_all_evidence_is_frozen(self):
+        """Assigning any *field* must fail on every supported Python.
+
+        Deliberately a real dataclass field rather than a monkey-patched method.
+        A frozen+slots dataclass blocks field assignment with
+        ``FrozenInstanceError`` everywhere; assigning an attribute that is *not*
+        a field takes a different code path, and on Python 3.11/3.12 the
+        generated ``__setattr__`` falls through to
+        ``super(<pre-slots class>, self)`` and raises
+        ``TypeError: super(type, obj): obj must be an instance or subtype of
+        type``. That was a false CI failure: the immutability guarantee held, the
+        assertion was version-dependent. Fixed by testing the field path.
+        """
         evs = [
             GOOD_BOOTSTRAP,
             DrainEvidence(engine_drain_completed=True),
             InvalidateEvidence(True, True, True),
+            UpdateEvidence(target=TARGET_V1, weights_loaded=True, finish_acknowledged=True),
+            ValidateEvidence(
+                target=TARGET_V1, observed_engine_label=TARGET_V1.label, is_paused=True
+            ),
+            ResumeEvidence(target=TARGET_V1, resume_acknowledged=True, is_paused=False),
         ]
         for ev in evs:
+            field_name = fields(ev)[0].name
             with self.subTest(ev=type(ev).__name__), self.assertRaises(FrozenInstanceError):
-                ev.failure_reason = lambda: None  # type: ignore[method-assign]
+                setattr(ev, field_name, None)
 
     def test_update_target_is_frozen(self):
         t = target(1)

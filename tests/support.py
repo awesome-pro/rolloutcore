@@ -32,8 +32,8 @@ IDENTITY_V1: WeightIdentity = manifest_identity("v1")
 IDENTITY_V2: WeightIdentity = manifest_identity("v2")
 
 #: A bootstrap a correct adapter produces against a fresh ``vllm serve``: the
-#: engine reports the unmanaged literal ``"default"``, the adapter seeds
-#: ``rc-0``, and the post-seed read confirms it.
+#: engine reports the unmanaged literal ``"default"``, the driver initializes the
+#: transfer engine, the adapter seeds ``rc-0``, and the post-seed read confirms it.
 GOOD_BOOTSTRAP = BootstrapEvidence(
     observed_engine_label="rc-0",
     weight_transfer_initialised=True,
@@ -41,6 +41,18 @@ GOOD_BOOTSTRAP = BootstrapEvidence(
     weight_identity=IDENTITY_V0,
     backend="nccl",
     world_size=2,
+    weight_transfer_driver="test-driver",
+)
+
+#: The control-plane-only variant: no transfer engine, no driver.
+GOOD_BOOTSTRAP_NO_DRIVER = BootstrapEvidence(
+    observed_engine_label="rc-0",
+    weight_transfer_initialised=False,
+    pre_seed_label="default",
+    weight_identity=IDENTITY_V0,
+    backend="none",
+    world_size=None,
+    weight_transfer_driver=None,
 )
 
 

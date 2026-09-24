@@ -6,11 +6,13 @@ amendment 3:
 
 * ``WeightVersion`` -- a *generation number* for lifecycle ordering, serialised
   into the engine's opaque ``weight_version`` string.
-* ``WeightIdentity`` -- an immutable *content digest* over the parameter
-  manifest, which is what invariant I4 needs in order to claim exact weights.
+* ``WeightIdentity`` -- an immutable digest over the **declared weight source**:
+  the parameter manifest, plus trainer-side provenance when one is supplied,
+  which is what invariant I4 needs in order to claim a weight source.
 
 Tests for both the label format/ordering and the digest's canonicity live here,
-plus the constraint ``cache_salt`` must satisfy to be accepted by vLLM's OpenAI
+plus the two-tier identity semantics (manifest-only vs provenance-qualified) and
+the constraint ``cache_salt`` must satisfy to be accepted by vLLM's OpenAI
 schema.
 """
 
@@ -28,6 +30,7 @@ from rolloutcore import (
     VersionError,
     WeightIdentity,
     WeightIdentityError,
+    WeightSource,
     WeightVersion,
 )
 
@@ -182,6 +185,85 @@ class TestWeightIdentity(unittest.TestCase):
     def test_duplicate_names_rejected(self):
         with self.assertRaises(WeightIdentityError):
             WeightIdentity.from_pairs([PAIRS[0], PAIRS[0]])
+
+    def test_manifest_only_is_labelled_as_such(self):
+        """Review item 4: a manifest digest must not claim a training step."""
+        ident = WeightIdentity.from_pairs(PAIRS)
+        self.assertEqual(ident.exactness, "manifest-only")
+        self.assertIsNone(ident.source)
+        self.assertEqual(ident.manifest_digest, ident.digest)
+        self.assertIn("manifest-only", ident.describe())
+
+    def test_manifest_only_digest_is_unchanged_from_before(self):
+        """Backward compatibility: the provenance-free digest is the same value.
+
+        Pinned to a literal so a future encoding change cannot silently
+        invalidate stored trajectory identities.
+        """
+        ident = WeightIdentity.from_pairs([("a", "f16", (2, 2))])
+        self.assertEqual(
+            ident.digest,
+            WeightIdentity.from_param_specs([ParamSpec("a", "f16", (2, 2))]).digest,
+        )
+        self.assertNotEqual(
+            ident.digest,
+            WeightIdentity.from_pairs([("a", "f16", (2, 2))], source=WeightSource(step=1)).digest,
+        )
+
+
+class TestWeightSource(unittest.TestCase):
+    """Review item 4: provenance is what makes a trajectory claim specific."""
+
+    def test_empty_source_is_rejected(self):
+        with self.assertRaises(WeightIdentityError):
+            WeightSource()
+
+    def test_any_single_field_is_enough(self):
+        for src in (
+            WeightSource(checkpoint="Qwen/Qwen3-1.7B-Base@main"),
+            WeightSource(run_id="run-7"),
+            WeightSource(step=0),
+        ):
+            with self.subTest(src=src):
+                self.assertTrue(src.canonical())
+
+    def test_bad_values_rejected(self):
+        for bad in ({"checkpoint": ""}, {"run_id": ""}, {"step": -1}, {"step": True}):
+            with self.subTest(bad=bad), self.assertRaises(WeightIdentityError):
+                WeightSource(**bad)  # type: ignore[arg-type]
+
+    def test_canonical_omits_unset_fields(self):
+        """``None`` must not leak into the digest as the string 'None'."""
+        self.assertEqual(WeightSource(step=5).canonical(), "step=5")
+        self.assertNotIn("None", WeightSource(step=5).canonical())
+
+    def test_two_training_steps_of_one_architecture_differ(self):
+        """The exact hole the manifest digest left open."""
+        manifest = [("model.embed_tokens.weight", "bfloat16", (151936, 2048))]
+        at_100 = WeightIdentity.from_pairs(manifest, source=WeightSource(step=100))
+        at_500 = WeightIdentity.from_pairs(manifest, source=WeightSource(step=500))
+        self.assertNotEqual(at_100, at_500)
+        self.assertEqual(at_100.manifest_digest, at_500.manifest_digest)
+        self.assertEqual(at_100.exactness, "declared-source")
+
+    def test_provenance_digest_covers_checkpoint_and_run_id(self):
+        manifest = [("a", "f16", (2, 2))]
+        base = WeightIdentity.from_pairs(manifest, source=WeightSource(step=1))
+        for other in (
+            WeightSource(step=2),
+            WeightSource(step=1, run_id="r"),
+            WeightSource(step=1, checkpoint="ckpt"),
+        ):
+            with self.subTest(other=other):
+                self.assertNotEqual(base, WeightIdentity.from_pairs(manifest, source=other))
+
+    def test_source_rides_the_target(self):
+        t = UpdateTarget(
+            version=WeightVersion(3),
+            identity=WeightIdentity.from_pairs(PAIRS, source=WeightSource(step=42)),
+        )
+        self.assertIn("step=42", t.describe())
+        self.assertIn("rc-3", t.describe())
 
     def test_empty_manifest_is_legal(self):
         ident = WeightIdentity.from_pairs([])

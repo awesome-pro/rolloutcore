@@ -22,12 +22,15 @@ import unittest
 from support import IDENTITY_V0
 
 from rolloutcore import (
+    AlreadyManagedEngineError,
     EngineTaintedError,
+    EvidenceNotReady,
     LifecycleController,
     LifecycleRunner,
     LifecycleState,
     RolloutCoreError,
     VersionMismatchError,
+    WeightTransferNotConfiguredError,
     WeightVersion,
 )
 from rolloutcore.adapters import (
@@ -75,15 +78,41 @@ class TestBootstrap(unittest.TestCase):
         self.assertEqual(ctrl.current_version, WeightVersion(0))
 
     def test_bootstrap_refuses_to_adopt_a_managed_engine(self):
-        """Amendment 4, end to end."""
+        """Amendment 4 + review item 1, end to end.
+
+        The refusal must leave the *engine* untouched, not just our controller
+        uninitialized: a late check would have written ``rc-0`` first and stolen
+        the other controller's ownership on the way out.
+        """
         engine = seeded_engine(IDENTITY_V0)
         engine.weight_version = "rc-7"  # a previous controller already owns it
         runner, ctrl, _ = make_runner(engine)
+        engine.calls.clear()
 
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(AlreadyManagedEngineError) as ctx:
             runner.bootstrap()
+
         self.assertIn("lease/recovery", str(ctx.exception))
-        self.assertIs(ctrl.state, LifecycleState.TAINTED)
+        # Review item 1: no mutation, so no taint. The engine is healthy and
+        # simply not ours; a taint here would demand restarting a working engine.
+        self.assertIs(ctrl.state, LifecycleState.UNINITIALIZED)
+        self.assertEqual(engine.weight_version, "rc-7", "the label must not move")
+        self.assertNotIn("update_weight_version", engine.calls)
+        self.assertNotIn("init_weight_transfer_engine", engine.calls)
+        self.assertEqual(engine.calls, ["get_weight_info"])
+
+    def test_bootstrap_after_a_refusal_can_still_succeed(self):
+        """A refusal is retryable: nothing was written and nothing was tainted."""
+        engine = seeded_engine(IDENTITY_V0)
+        engine.weight_version = "rc-7"
+        runner, ctrl, _ = make_runner(engine)
+        with self.assertRaises(AlreadyManagedEngineError):
+            runner.bootstrap()
+
+        engine.weight_version = "default"  # the other controller released it
+        runner.bootstrap()
+        self.assertIs(ctrl.state, LifecycleState.READY)
+        self.assertEqual(engine.weight_version, "rc-0")
 
 
 class TestFullCycle(unittest.TestCase):
@@ -223,8 +252,6 @@ class TestDrainWhileRequestsActive(unittest.TestCase):
         adapter.begin_drain()
         ctrl.begin_update  # noqa: B018 - documented below
         # Draining cannot complete yet.
-        from rolloutcore import EvidenceNotReady
-
         with self.assertRaises(EvidenceNotReady):
             ctrl.confirm_drained(adapter.await_drain())
         self.assertIs(ctrl.state, LifecycleState.DRAINING)
@@ -293,12 +320,86 @@ class TestFailurePaths(unittest.TestCase):
         self.assertEqual(ctrl.current_version, WeightVersion(0), "not committed by us")
 
     def test_failed_start_weight_update_taints(self):
+        """Review item 3: an ambiguous mutating failure is not left as UPDATING.
+
+        ``start_weight_update`` is exactly the ambiguous case: it may have opened
+        a session on some ranks and not others, so "the call raised" does not
+        mean "nothing happened".
+        """
         engine = seeded_engine(IDENTITY_V0)
         engine.faults["start_weight_update"] = "session already open"
         runner, ctrl, _ = make_runner(engine)
         runner.bootstrap()
 
+        with self.assertRaises(EngineTaintedError) as ctx:
+            runner.install_next(manifest_identity("v1"))
+        self.assertIn("start_weight_update", str(ctx.exception))
+        self.assertIn("unknown engine outcome", str(ctx.exception))
+        self.assertIs(ctrl.state, LifecycleState.TAINTED)
+        self.assertTrue(engine.paused)
+        self.assertEqual(ctrl.current_version, WeightVersion(0), "nothing was published")
+
+    def test_failed_cache_reset_taints(self):
+        engine = seeded_engine(IDENTITY_V0)
+        engine.faults["reset_prefix_cache"] = "block pool died"
+        runner, ctrl, _ = make_runner(engine)
+        runner.bootstrap()
+        with self.assertRaises(EngineTaintedError):
+            runner.install_next(manifest_identity("v1"))
+        self.assertIs(ctrl.state, LifecycleState.TAINTED)
+
+    def test_failed_resume_taints(self):
+        """A failed resume may have left the engine serving: never guess."""
+        engine = seeded_engine(IDENTITY_V0)
+        engine.faults["resume"] = "scheduler refused"
+        runner, ctrl, _ = make_runner(engine)
+        runner.bootstrap()
+        with self.assertRaises(EngineTaintedError):
+            runner.install_next(manifest_identity("v1"))
+        self.assertIs(ctrl.state, LifecycleState.TAINTED)
+
+    def test_failed_observation_does_not_taint(self):
+        """Review item 3's nuance: a failed *read* is retryable, not terminal.
+
+        Validation runs while the engine is paused, so a read failure leaves it
+        unable to serve anything new. Tainting would demand a restart for what
+        may be one dropped connection.
+        """
+        engine = seeded_engine(IDENTITY_V0)
+        runner, ctrl, _ = make_runner(engine)
+        runner.bootstrap()
+
+        engine.faults["get_weight_info"] = "connection reset"
+
         with self.assertRaises(FakeEngineError):
+            runner.install_next(manifest_identity("v1"))
+
+        self.assertIs(ctrl.state, LifecycleState.VALIDATING, "still fail-closed: paused")
+        self.assertFalse(ctrl.is_tainted)
+        self.assertTrue(engine.paused)
+        self.assertEqual(ctrl.current_version, WeightVersion(0), "nothing was published")
+
+        # And the cycle completes once the read recovers, without a restart.
+        del engine.faults["get_weight_info"]
+        pending = ctrl.pending_target
+        assert pending is not None
+        adapter = runner._adapter
+        ctrl.confirm_validated(adapter.validate_pre_resume(pending))
+        ctrl.confirm_resumed(adapter.resume(pending))
+        self.assertIs(ctrl.state, LifecycleState.READY)
+        self.assertEqual(ctrl.current_version, WeightVersion(1))
+
+    def test_missing_transfer_driver_does_not_taint(self):
+        """A config error sends nothing, so there is no ambiguity to taint."""
+        engine = seeded_engine(IDENTITY_V0)
+        runner, ctrl, adapter = make_runner(engine)
+        runner.bootstrap()
+
+        def refuse(_target):
+            raise WeightTransferNotConfiguredError("test", "no driver")
+
+        adapter.start_weight_update = refuse  # type: ignore[method-assign]
+        with self.assertRaises(WeightTransferNotConfiguredError):
             runner.install_next(manifest_identity("v1"))
         self.assertIs(ctrl.state, LifecycleState.UPDATING)
         self.assertTrue(engine.paused)

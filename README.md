@@ -8,11 +8,15 @@ RolloutCore sits around a vLLM inference engine and cycles it through
 rollout(vN) → drain → update(vN+1) → invalidate stale cache → resume → rollout(vN+1)
 ```
 
-while binding every trajectory to the exact weight version that produced it.
+while binding every trajectory to the committed generation *and* the declared
+weight source that produced it.
 
-> **Status: Phases 1–2 complete** — the lifecycle state machine, the typed
-> adapter port, a stdlib HTTP adapter, and a full `READY → … → READY` cycle
-> against an in-memory fake engine. Real-GPU work (Phase 3) has not started.
+> **Status: Phases 1–2 complete, plus the pre-GPU review patch** — the lifecycle
+> state machine, the typed adapter port, a stdlib HTTP adapter for the lifecycle
+> **control plane**, and a full `READY → … → READY` cycle against an in-memory
+> fake engine. Real weight transfer (NCCL) is **not** implemented, and real-GPU
+> work (Phase 3) has not started. Do not point this at a GPU expecting a hot
+> weight update yet.
 
 ---
 
@@ -22,6 +26,10 @@ while binding every trajectory to the exact weight version that produced it.
 ./scripts/test.sh          # tests + ruff + mypy
 ./scripts/test.sh --fast   # tests only
 python -m rolloutcore.demo # full cycle, fake engine, no GPU
+
+# Re-derive every file:LINE claim in the docs against a vLLM checkout:
+VLLM_CHECKOUT=/path/to/vllm ./scripts/test.sh
+python scripts/verify_anchors.py --vllm /path/to/vllm
 ```
 
 Pure stdlib on Python ≥ 3.11 — nothing to install. `scripts/test.sh` picks up
@@ -69,7 +77,9 @@ support in vLLM `main`** as of the commit audited (details in `PROJECT.md`):
 1. **One weight version per rollout.** PR #49040 added a `weight_version` query
    API but *deliberately removed* binding a version to `Request`/`RequestOutput`,
    because one request may span multiple versions. The contract is still open
-   (RFC #48306 §2.2).
+   (RFC #48306 §2.2). A generation number is a lifecycle position, not a weight
+   identity, so RolloutCore carries both: `WeightVersion` for ordering and a
+   `WeightIdentity` over the manifest **and** the declared trainer provenance.
 2. **No cross-version cache reuse.** Prefix-cache keys carry no weight
    generation (`vllm/v1/core/kv_cache_utils.py:610-646`), `finish_weight_update`
    invalidates nothing (`vllm/v1/worker/gpu_worker.py:1488-1505`), and the
@@ -95,8 +105,10 @@ real GitHub tip, not a local fork:
 
 The sibling checkout `vendor/vllm` is a stale fork (`d90f0eade5`) and was not
 used. The worktree is a shallow clone (depth 1), so **"NOT PRESENT" means absent
-at this commit, not never existed**. 396 anchors were machine-verified to
-resolve to real files with in-range line numbers.
+at this commit, not never existed**. `scripts/verify_anchors.py` re-derives every
+backticked `file.py:LINE` claim from the checkout: **398 anchors resolve to real
+files with in-range line numbers, 0 unresolved** (134 of them via a basename that
+appears in several directories, so the line was checked against each candidate).
 
 ---
 
@@ -104,15 +116,18 @@ resolve to real files with in-range line numbers.
 
 ```
 src/rolloutcore/
-  versions.py    WeightVersion (rc-N generation) + WeightIdentity (manifest digest)
-  evidence.py    Postconditions reported by the adapter
-  errors.py      IllegalTransition vs InvariantViolation vs EvidenceNotReady vs Taint
-  lifecycle.py   The 9-state machine — no I/O
-  port.py        LifecycleAdapter: the typed adapter contract
-  runner.py      Drives a cycle using typed adapter methods
-  demo.py        Runnable no-GPU demonstration
-  adapters/      fake_engine.py, fake.py (reference adapter), http.py (real vLLM)
-tests/           196 tests, incl. the full 9x9 illegal-transition matrix
-docs/            Design and plan-delta documents
-scripts/test.sh  Dependency-free check runner
+  versions.py        WeightVersion (rc-N generation) + WeightIdentity (declared source)
+  evidence.py        Postconditions reported by the adapter
+  errors.py          IllegalTransition vs InvariantViolation vs EvidenceNotReady vs Taint
+  lifecycle.py       The 9-state machine — no I/O
+  port.py            LifecycleAdapter: the typed adapter contract
+  weight_transfer.py WeightTransferDriver: the trainer-side NCCL seam
+  runner.py          Drives a cycle; taints on ambiguous effects
+  demo.py            Runnable no-GPU demonstration
+  adapters/          fake_engine.py, fake.py (reference adapter),
+                     http.py (lifecycle control plane over a real vLLM)
+tests/               226 tests, incl. the full 9x9 illegal-transition matrix
+docs/                Design and plan-delta documents
+scripts/test.sh      Dependency-free check runner
+scripts/verify_anchors.py  Re-derives the docs' vLLM file:LINE claims
 ```

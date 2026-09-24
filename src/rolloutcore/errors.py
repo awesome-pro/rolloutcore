@@ -15,6 +15,17 @@ This split is load-bearing, not cosmetic:
 Conflating the two would either (a) taint a perfectly healthy engine because a
 caller was early, or (b) continue serving from an engine whose state we can no
 longer prove. Both are worse than two exception types.
+
+Three further cases are neither, and are separated for the same reason:
+
+* ``AlreadyManagedEngineError`` -- the engine is healthy but owned by another
+  controller. Nothing was written, so it must not taint *our* controller, and
+  the controller must not be left able to serve.
+* ``WeightTransferNotConfiguredError`` -- no side effect was attempted, so the
+  engine state is untouched; the runner must not translate it into a taint.
+* ``DrainFailedError`` -- the pause is known to be in effect but the drain did
+  not finish. Fail-closed (the controller stays in DRAINING, which cannot admit
+  rollouts) without declaring the engine untrustworthy.
 """
 
 from __future__ import annotations
@@ -63,6 +74,77 @@ class IllegalTransitionError(InvariantViolation):
         if detail:
             message = f"{message}: {detail}"
         super().__init__("T-ILLEGAL", message)
+
+
+class AlreadyManagedEngineError(RolloutCoreError):
+    """Bootstrap found an engine already carrying a RolloutCore label.
+
+    Raised by the **adapter**, before it writes anything. The controller-level
+    check in ``BootstrapEvidence.failure_reason`` runs after the adapter has
+    already returned, which is too late: a bootstrap that read ``rc-7`` and then
+    wrote ``rc-0`` would have corrupted the first controller's ownership before
+    anyone could refuse it.
+
+    Deliberately **not** an ``EngineTaintedError``: the engine is not
+    untrustworthy, it is *someone else's*. Nothing was mutated, so this is
+    retryable if that other controller legitimately releases the engine.
+
+    Recovering a managed engine in place would need a lease/recovery protocol
+    that V1 does not implement; see ``docs/state-machine.md`` section 7.
+    """
+
+    def __init__(self, observed_label: str) -> None:
+        self.observed_label = observed_label
+        super().__init__(
+            f"engine already reports weight_version {observed_label!r}, which "
+            "RolloutCore wrote: another controller may own it. Bootstrap "
+            "refused before writing anything. A lease/recovery protocol is "
+            "required to take over a managed engine and V1 does not implement one."
+        )
+
+
+class WeightTransferNotConfiguredError(RolloutCoreError):
+    """A weight-moving operation was requested with no usable transfer driver.
+
+    Raised **before** any request is sent, so the engine state is unchanged and
+    the caller may taint or abandon deliberately. This is the honest failure for
+    the control-plane-only path: RolloutCore will not send an empty
+    ``update_info`` and call it a weight update.
+
+    Note it is a ``RolloutCoreError``, which is how the runner's effect wrapper
+    knows *not* to translate it into a taint: no side effect was attempted, so
+    there is nothing ambiguous to taint about.
+    """
+
+    def __init__(self, operation: str, detail: str) -> None:
+        self.operation = operation
+        self.detail = detail
+        super().__init__(f"{operation} needs a weight-transfer driver: {detail}")
+
+
+class DrainFailedError(RolloutCoreError):
+    """The drain could not be driven to completion within the retry budget.
+
+    Retryable in principle -- the engine was paused (``PAUSED_NEW`` is set
+    before the drain waits, ``vllm/v1/engine/core.py:1984-2026``), so no new work
+    can be admitted and nothing was published -- but RolloutCore stops polling
+    rather than spinning against an attempt that is not progressing.
+
+    Not a taint: the engine's pause state is known, and it is not serving new
+    requests. The controller stays in DRAINING, which is fail-closed because
+    DRAINING cannot admit rollouts.
+    """
+
+    def __init__(self, attempts: int, last_error: str | None) -> None:
+        self.attempts = attempts
+        self.last_error = last_error
+        detail = f" after {attempts} attempt(s)"
+        if last_error:
+            detail = f"{detail}; last error: {last_error}"
+        super().__init__(
+            f"drain did not complete{detail}. The engine remains paused; "
+            "resuming is an operator decision."
+        )
 
 
 class EngineTaintedError(RolloutCoreError):

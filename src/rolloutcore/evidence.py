@@ -33,12 +33,19 @@ class Evidence:
 class BootstrapEvidence(Evidence):
     """Result of bringing a fresh engine under RolloutCore control.
 
-    Phase 2 adapter produces this from, in order:
-    ``POST /init_weight_transfer_engine`` -> read the pre-seed label ->
-    ``POST /update_weight_version {"new_version": "rc-0"}`` -> ``GET /weight_info``
-    -> ``GET /get_world_size``. All are vLLM dev endpoints
-    (``vllm/entrypoints/serve/dev/rlhf/api_router.py:156``, ``:213``, ``:222``,
-    ``:228``) and all require ``VLLM_SERVER_DEV_MODE=1``.
+    The adapter must refuse **before writing anything** if the engine already
+    reports an ``rc-*`` label: it reads ``GET /weight_info`` first and raises
+    :class:`~rolloutcore.errors.AlreadyManagedEngineError` if the label parses as
+    a RolloutCore version. The check in :meth:`failure_reason` below is the
+    controller-side backstop for that contract, not the primary defence -- by the
+    time the controller sees this object, a careless adapter would already have
+    overwritten another controller's label.
+
+    ``/init_weight_transfer_engine`` is posted by the **driver**, not the
+    adapter: upstream's ``trainer_init`` opens the trainer endpoint and
+    initializes the workers concurrently, so the two cannot be separated
+    (``vllm/distributed/weight_transfer/factory.py:167``). ``weight_transfer_driver``
+    records which driver did it, or ``None`` for the control-plane-only path.
 
     **V1 bootstrap is single-owner.** A new controller may only claim an engine
     whose label is *unmanaged* (``"default"`` on a fresh server). Adopting an
@@ -59,14 +66,29 @@ class BootstrapEvidence(Evidence):
     pre_seed_label: str | None
     #: Identity of the weights the engine currently holds.
     weight_identity: WeightIdentity
-    #: Backend the engine was launched with, e.g. ``"nccl"``.
+    #: Engine-side backend key the driver reported, e.g. ``"nccl"``; ``"none"``
+    #: on the control-plane-only path.
     backend: str = "nccl"
     #: ``world_size_across_dp`` from ``GET /get_world_size``; None if unknown.
     world_size: int | None = None
+    #: Which :class:`~rolloutcore.weight_transfer.WeightTransferDriver`
+    #: initialized the transfer engine, or ``None`` when bootstrap ran
+    #: control-plane-only. A controller with no driver can never legally install
+    #: new weights, so this is recorded rather than inferred.
+    weight_transfer_driver: str | None = None
 
     def failure_reason(self) -> str | None:
-        if not self.weight_transfer_initialised:
-            return "weight transfer engine was not initialised"
+        if not self.weight_transfer_initialised and self.weight_transfer_driver is not None:
+            return (
+                f"weight transfer driver {self.weight_transfer_driver!r} reported an "
+                "uninitialised transfer engine"
+            )
+        if self.weight_transfer_initialised and self.weight_transfer_driver is None:
+            return (
+                "bootstrap reports an initialised weight transfer engine but no "
+                "driver to drive it; a bootstrapped controller must be able to "
+                "account for how updates reach the engine"
+            )
 
         if self.pre_seed_label is None:
             return (
@@ -131,9 +153,13 @@ class DrainEvidence(Evidence):
 class UpdateEvidence(Evidence):
     """Result of transferring and loading the new weights.
 
-    Phase 2 adapter produces this from ``POST /finish_weight_update``
-    (``dev/rlhf/api_router.py:204``) returning successfully. The engine's own
-    commit point is ``AsyncLLM.finish_weight_update``
+    Produced from the driver's
+    :class:`~rolloutcore.weight_transfer.WeightTransferReport`. The driver owns
+    ``/start_weight_update`` -> ``/update_weights`` -> ``/finish_weight_update``
+    because they interleave with the trainer-side collective; RolloutCore
+    assembles the evidence and checks it here.
+
+    The engine's own commit point is ``AsyncLLM.finish_weight_update``
     (``vllm/v1/engine/async_llm.py:1284-1288``): it runs the worker-side
     ``finish_weight_update`` collective RPC and *then* writes the version.
 
@@ -152,8 +178,11 @@ class UpdateEvidence(Evidence):
     chunks_transferred: int | None = None
     #: Did the trainer-side NCCL/IPC data plane report completion?
     data_plane_complete: bool = True
-    #: Identity the adapter independently observed on the engine side, if any.
-    #: A mismatch against ``target.identity`` means the wrong checkpoint landed.
+    #: Manifest identity of the tensors the driver *actually staged*, computed
+    #: from its own source metadata -- not from the target it was asked for. A
+    #: mismatch against ``target.identity`` means the wrong checkpoint was
+    #: pushed. ``None`` when the driver cannot compute one; the engine reports
+    #: only an opaque version string, so there is no engine-side identity to read.
     observed_identity: WeightIdentity | None = None
 
     def failure_reason(self) -> str | None:
@@ -165,8 +194,8 @@ class UpdateEvidence(Evidence):
             return "finish_weight_update was not acknowledged by the engine"
         if self.observed_identity is not None and self.observed_identity != self.target.identity:
             return (
-                f"engine holds weight identity {self.observed_identity.short} but "
-                f"{self.target.identity.short} was loaded"
+                f"driver staged weight source {self.observed_identity.describe()} but "
+                f"{self.target.identity.describe()} was the target"
             )
         return None
 

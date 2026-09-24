@@ -4,6 +4,8 @@
 * :mod:`rolloutcore.lifecycle` -- the pure state machine (Phase 1).
 * :mod:`rolloutcore.port` -- the typed adapter interface (Phase 2 boundary).
 * :mod:`rolloutcore.runner` -- drives a cycle using typed adapter methods.
+* :mod:`rolloutcore.weight_transfer` -- the trainer-side weight-transfer seam
+  (a driver owns the NCCL rendezvous and the update round trip).
 * :mod:`rolloutcore.adapters` -- fake and HTTP implementations of the port.
 
 See ``docs/state-machine.md`` for the design and ``docs/plan-delta.md`` for how
@@ -11,7 +13,9 @@ this relates to the original plan and to what vLLM main actually provides.
 """
 
 from .errors import (
+    AlreadyManagedEngineError,
     DrainDisagreementError,
+    DrainFailedError,
     EngineTaintedError,
     EvidenceNotReady,
     IllegalTransitionError,
@@ -20,6 +24,7 @@ from .errors import (
     RolloutCoreError,
     UnknownRolloutError,
     VersionMismatchError,
+    WeightTransferNotConfiguredError,
 )
 from .evidence import (
     BootstrapEvidence,
@@ -55,7 +60,15 @@ from .versions import (
     VersionError,
     WeightIdentity,
     WeightIdentityError,
+    WeightSource,
     WeightVersion,
+)
+from .weight_transfer import (
+    LifecycleOnlyDriver,
+    NCCLWeightTransferDriver,
+    WeightTransferDriver,
+    WeightTransferInit,
+    WeightTransferReport,
 )
 
 __all__ = [
@@ -66,11 +79,13 @@ __all__ = [
     "LEGAL_TRANSITIONS",
     "PAUSED_STATES",
     "ROLLOUT_COMPLETION_STATES",
+    "AlreadyManagedEngineError",
     "BootstrapEvidence",
     "CyclePlan",
     "CycleResult",
     "DrainDisagreementError",
     "DrainEvidence",
+    "DrainFailedError",
     "EngineTaintedError",
     "Event",
     "Evidence",
@@ -80,8 +95,10 @@ __all__ = [
     "InvariantViolation",
     "LifecycleAdapter",
     "LifecycleController",
+    "LifecycleOnlyDriver",
     "LifecycleRunner",
     "LifecycleState",
+    "NCCLWeightTransferDriver",
     "NotServingError",
     "OrphanedRollout",
     "ParamSpec",
@@ -97,6 +114,11 @@ __all__ = [
     "VersionMismatchError",
     "WeightIdentity",
     "WeightIdentityError",
+    "WeightSource",
+    "WeightTransferDriver",
+    "WeightTransferInit",
+    "WeightTransferNotConfiguredError",
+    "WeightTransferReport",
     "WeightVersion",
     "enumerate_transition_matrix",
 ]
