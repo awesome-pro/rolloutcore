@@ -1,12 +1,34 @@
 {
   "phase": "4B",
   "model": "facebook/opt-125m",
-  "ok": false,
-  "started_at": "2026-09-24T16:04:50+00:00",
-  "rolloutcore_sha": "47856fc554db4703a41d2e0ab35c4f9247c888a6",
+  "ok": true,
+  "started_at": "2026-09-24T16:16:20+00:00",
+  "rolloutcore_sha": "f0010dae790f1cfc4af06161914e42f785d603f1",
   "rolloutcore_dirty": false,
   "vllm_version": "0.30.1rc1.dev60+g00b7847c8",
-  "error": "IllegalTransitionError: [T-ILLEGAL] event 'confirm_drained' is not legal from state READY",
+  "checks": {
+    "A_drain_failed_with_DrainFailedError": true,
+    "A_drain_failure_does_not_taint": true,
+    "A_state_stays_DRAINING": true,
+    "A_stragglers_were_aborted": true,
+    "A_recovery_reaches_READY": true,
+    "A_recovery_installs_the_update": true,
+    "A_recovery_serves": true,
+    "B_mismatch_raises_WeightIdentityMismatchError": true,
+    "B_nothing_was_written": true,
+    "B_engine_still_paused": true,
+    "B_engine_label_unchanged": true,
+    "B_no_taint": true,
+    "C_drain_path_surfaces_a_failure": true,
+    "C_nothing_was_committed": true,
+    "C_bootstrap_on_a_dead_engine_taints": true,
+    "C_taint_has_a_reason": true,
+    "C_taint_is_terminal": true,
+    "C_refusal_is_local": true,
+    "D_fresh_controller_bootstraps": true,
+    "D_fresh_engine_is_rc0": true,
+    "D_it_serves": true
+  },
   "detail": {
     "drain_failure": {
       "error": "drain did not complete after 1 attempt(s); last error: timed out. The engine remains paused; resuming is an operator decision.",
@@ -28,15 +50,35 @@
       "engine_label": "rc-1",
       "tainted": false,
       "text": " the capital of the French Republic.\n\nThe capital of France is the capital"
+    },
+    "identity_mismatch": {
+      "error": "[I4-IDENTITY] the driver would stage 925369d663bc (manifest-only) but 8b378e8b3fe0 (manifest-only) is the target; refusing before any request is sent",
+      "state": "UPDATING",
+      "tainted": false,
+      "engine_paused": true,
+      "engine_label": "rc-1",
+      "start_weight_update_posts_this_attempt": 0,
+      "fresh_controller_bootstrap": "AlreadyManagedEngineError: engine already reports weight_version 'rc-1', which RolloutCore wrote: another controller may own it. Bootstrap refused before writing anything. A lease/recovery protocol is required to take over a managed engine and V1 does not implement one.",
+      "resumed_by_hand": true
+    },
+    "dead_engine_drain_path": {
+      "error": "DrainFailedError: drain did not complete after 3 attempt(s); last error: POST http://localhost:8000/pause?mode=wait&clear_cache=true: transport error: [Errno 111] Connection refused. The engine remains paused; resuming is an operator decision.",
+      "state": "DRAINING",
+      "tainted": false,
+      "committed": "rc-0"
+    },
+    "dead_engine_taint": {
+      "bootstrap_error": "EngineTaintedError: engine tainted in state UNINITIALIZED: bootstrap failed with an unknown engine outcome: HTTPAdapterError('GET http://localhost:8000/weight_info: transport error: [Errno 111] Connection refused'). TAINTED is terminal in V1: restart the engine and construct a new controller.",
+      "tainted": true,
+      "taint_reason": "bootstrap failed with an unknown engine outcome: HTTPAdapterError('GET http://localhost:8000/weight_info: transport error: [Errno 111] Connection refused')",
+      "second_cycle": "IllegalTransitionError: [T-ILLEGAL] event 'begin_drain' is not legal from state TAINTED",
+      "second_cycle_seconds": 0.0
+    },
+    "fresh_recovery": {
+      "state": "READY",
+      "engine_label": "rc-0",
+      "text": "<s><s><s><s><s><s><s><s><s><s><s><s><s><s><s><s>",
+      "prev_controller_still_tainted": true
     }
-  },
-  "checks": {
-    "A_drain_failed_with_DrainFailedError": true,
-    "A_drain_failure_does_not_taint": true,
-    "A_state_stays_DRAINING": true,
-    "A_stragglers_were_aborted": true,
-    "A_recovery_reaches_READY": true,
-    "A_recovery_installs_the_update": true,
-    "A_recovery_serves": true
   }
 }
