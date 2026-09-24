@@ -20,12 +20,12 @@ takes about a minute; the rest is environment setup.
 
 ---
 
-## 0. Before you rent anything (free, on the Mac)
+## 0. Before you rent anything (free, on your machine)
 
 ```bash
-cd ~/Desktop/rolloutcore
+cd /path/to/rolloutcore
 ./scripts/test.sh                 # tests + ruff + mypy + demo
-VLLM_CHECKOUT=~/Desktop/vllm-learning/vendor/vllm-main ./scripts/test.sh   # + anchor check
+VLLM_CHECKOUT=/path/to/vllm ./scripts/test.sh   # + anchor check
 ```
 
 Then run the harness against the in-repo stub. This exercises the *entire*
@@ -46,10 +46,10 @@ the drift, warm-server, and in-process-engine failure modes).
 
 ### Commit and push
 
-The pod cannot see this Mac. Either push the branch, or `rsync` it (step 2).
+The pod cannot see your machine. Either push the branch, or `rsync` it (step 2).
 
 ```bash
-cd ~/Desktop/rolloutcore
+cd /path/to/rolloutcore
 git add -A && git commit -m "Phase 3A: live control-plane harness, WeightProvenance rename"
 git push origin main
 ```
@@ -82,7 +82,7 @@ work, not more.
 
 ### What the pinned commit actually requires
 
-Read from the audit checkout (`vendor/vllm-main` @ `00b7847c`), not guessed:
+Read from a checkout at the audited commit, not guessed:
 
 | Requirement | Value | Source |
 |---|---|---|
@@ -121,17 +121,17 @@ output; it goes into the report.
 The repository is **private**, so a plain `https://` clone will stop at
 `Username for 'https://github.com':`. Pick one:
 
-**A. tar over SSH from the Mac (no GitHub auth, and no `rsync` needed on the
+**A. tar over SSH from your machine (no GitHub auth, and no `rsync` needed on the
 pod; recommended).** In RunPod's Connect panel use the **SSH over exposed TCP**
 tab, not the `ssh.runpod.io` proxy (that one documents "No support for SCP &
 SFTP"):
 
 ```bash
-# on the Mac; substitute <host> and <port> from that tab
-tar czf - -C ~/Desktop \
+# on your machine, in the checkout; substitute <host> and <port> from that tab
+tar czf - -C "$(dirname "$(git rev-parse --show-toplevel)")" \
     --exclude=.venv --exclude=__pycache__ --exclude=.pytest_cache \
     --exclude=.mypy_cache --exclude=.ruff_cache --exclude=results \
-    rolloutcore \
+    "$(basename "$(git rev-parse --show-toplevel)")" \
   | ssh -p <port> -i ~/.ssh/id_ed25519 root@<host> \
       'tar xzf - -C /workspace && ls /workspace/rolloutcore'
 ```
@@ -145,7 +145,7 @@ bare `~` inside `-e`, which rsync does not expand; use `$HOME`:
 ```bash
 rsync -av -e "ssh -p <port> -i $HOME/.ssh/id_ed25519" \
     --exclude .venv --exclude __pycache__ --exclude results \
-    ~/Desktop/rolloutcore/ root@<host>:/workspace/rolloutcore/
+    /path/to/rolloutcore/ root@<host>:/workspace/rolloutcore/
 ```
 
 **B. A personal access token** (fine for `git` commands, but do not paste the
@@ -163,7 +163,7 @@ prompt too, so check it before assuming the token is wrong.
 **C. Upload a tarball** through Jupyter's file browser, then
 `tar xzf rolloutcore.tgz` in `/workspace`.
 
-A tarball extracted as root keeps the Mac's uid, so git refuses it with
+A tarball extracted as root keeps your machine's uid, so git refuses it with
 `detected dubious ownership in repository`:
 
 ```bash
@@ -177,7 +177,7 @@ Then, whichever route you took:
 ```bash
 cd /workspace/rolloutcore
 python3 -V                        # >= 3.11
-git rev-parse HEAD 2>/dev/null || echo "rsync copy: record the Mac's HEAD instead"
+git rev-parse HEAD 2>/dev/null || echo "rsync copy: record your machine's HEAD instead"
 ls src/rolloutcore scripts/live_control_plane_smoke.py tests/fake_dev_server.py
 ```
 
@@ -337,7 +337,7 @@ key sends `Ctrl-c` instead, which kills whatever is in the foreground.
 If the prefix keeps fighting your terminal, don't fight it:
 
 - **A second SSH session is the simplest fix.** Keep the server in tmux window 0
-  and open another terminal on your Mac, `ssh` in again, and run the harness
+  and open another terminal on your machine, `ssh` in again, and run the harness
   there. `tmux attach -t vllm` is only needed if you want to *watch* the server.
 - **Or skip tmux for the server entirely**: `nohup` survives a disconnect just
   as well:
@@ -529,7 +529,7 @@ actually showed.
 | `environment` warns | vLLM is not the audited commit | record it in the report; do not hide it |
 | `ImportError: libcudart.so.13` (or `.so.12`) | vLLM wheel and torch came from different CUDA variants | `rm -rf .venv`, recreate it, and install both from one variant in a single `uv pip install`; never layer a second install over a mismatched one |
 | `invalid value 'cu130' for '--torch-backend'` | `--torch-backend` is an uv enum, and uv 0.9.0 stops at `cu129` | `pip install -U uv`, or use `cu129` (fine on a 580 driver) |
-| `fatal: detected dubious ownership` | a tarball copied from the Mac carried uid 501 into a root shell | `chown -R root:root /workspace/rolloutcore`, or add a `safe.directory` exception |
+| `fatal: detected dubious ownership` | a tarball copied from your machine carried uid 501 into a root shell | `chown -R root:root /workspace/rolloutcore`, or add a `safe.directory` exception |
 | `CUDA driver version is insufficient for CUDA runtime version` | the wheel is `cu130` but the driver is older than R580 (`gpu.cuda.inc.md:327`) | reinstall with `--torch-backend=cu129`, or move to a pod whose driver is R580+ |
 | torch ended up at the wrong version | it was installed by hand, or by `pip` against a nightly index | never pin torch yourself: it is pinned at `2.13.0` by `requirements/cuda.txt:7`. Reinstall with `uv` (step 3) |
 | an old image ships PyTorch 2.4 / CUDA 12.4 | stale template, ~9 minors behind this commit | use `vllm/vllm-openai`, or install vLLM per step 3; the template's torch does not matter once `uv --torch-backend=auto` runs |

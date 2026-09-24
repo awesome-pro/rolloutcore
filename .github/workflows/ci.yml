@@ -6,9 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Phase 1 and the fake-engine cycle are pure Python with no dependencies, so the
-# whole matrix is cheap. GPU work (the real vLLM adapter against `vllm serve`)
-# is deliberately not here yet: see PROJECT.md's roadmap.
+# The state machine, the adapters and the replay validator are pure Python with
+# no dependencies, so the whole matrix is cheap. GPU work (a real `vllm serve`
+# plus NCCL) is not here: it needs a pod, and `diagnostics/` owns those runs.
 env:
   PYTHONPATH: src:tests
 

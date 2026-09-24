@@ -2,9 +2,9 @@
 
 **Target:** `vllm-project/vllm` @ `main`
 **Commit audited:** `00b7847c8036b667742b4efb21aab1de51fd4721`, *"[Perf] Use Conv3dLayer for MiniMax M3 patch embedding (#58512)"*, committer date `2026-09-24T07:41:36Z`
-**Verification:** git worktree at `/Users/abhinandan/Desktop/vllm-learning/vendor/vllm-main`, fetched directly from `https://github.com/vllm-project/vllm.git`. `git ls-remote origin refs/heads/main` and `gh api repos/vllm-project/vllm/commits/main` both return this SHA; working tree clean; audited read-only.
+**Verification:** a read-only git worktree cloned from `https://github.com/vllm-project/vllm.git`. `git ls-remote origin refs/heads/main` and `gh api repos/vllm-project/vllm/commits/main` both return this SHA; working tree clean.
 
-> The sibling checkout `/Users/abhinandan/Desktop/vllm-learning/vendor/vllm` is a **stale fork** (`d90f0eade5`) and was not used. The worktree is a **shallow** clone (depth 1), so "not present" means *absent at this commit*, not *never existed*.
+> The clone is **shallow** (depth 1), so "not present" means *absent at this commit*, not *never existed*. Re-derive every anchor with `python3 scripts/verify_anchors.py --vllm <checkout>`.
 
 Every claim carries a `path:LINE` anchor plus the owning class/function. Anything unsubstantiated is marked **NOT PRESENT on main@00b7847c**.
 
@@ -884,7 +884,6 @@ VLLM_SERVER_DEV_MODE=1 vllm serve <model> \
 ```
 Precedent: `examples/rl/rlhf_http_nccl.py:63-83` (which also uses `--load-format dummy` to start before real weights exist).
 
-## Appendix C: Raw research artifacts
+## Appendix C: Upstream references
 
-Fetched RFC bodies and comment threads (untrusted upstream data, kept verbatim) in `research/`:
-`rfc_48314.json`, `rfc_48311.json`, `rfc_31848.json`, `rfc_48305.json`, `rfc_48306.json`, `rfc_48312.json`, `comments_48314.md`, `comments_31848.md`, `comments_48306.md`, `comments_48312.md`.
+The RFCs and issues this map cross-checks (`#48305`, `#48306`, `#48311`, `#48312`, `#48314`, `#31848`) are upstream GitHub artifacts. Section 10 records what each one requires of an implementation; none of their text is reproduced here.

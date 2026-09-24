@@ -181,7 +181,7 @@ and `NCCL_DEBUG` output if it hung. If NCCL fails here, the problem is the pod /
 CUDA / NCCL / vLLM, not RolloutCore. RolloutCore code should not be written
 yet.
 
-## 5. Step 2: implement `NCCLWeightTransferDriver` (Mac-side, no GPU needed)
+## 5. Step 2: implement `NCCLWeightTransferDriver` (locally, no GPU needed)
 
 Once B3 passes, the remaining work is code, and the design is already written in
 `docs/phase3b-notes.md`:
@@ -348,7 +348,7 @@ it blocks. Bound it from outside (the harnesses here use their own budget plus
 
 Two A6000-class GPUs are ~$0.7/h. Step 1 (the upstream proof) is a one-hour
 session if it works first time. The driver implementation (step 2) costs **no GPU
-time** (it is Mac-side work against a documented API), so the sequence is:
+time** (it is local work against a documented API), so the sequence is:
 prove NCCL on the pod, stop the pod, implement, then rent again for 3C.
 
 Send back from the 2-GPU session:

@@ -8,8 +8,8 @@
   (a driver owns the NCCL rendezvous and the update round trip).
 * :mod:`rolloutcore.adapters` -- fake and HTTP implementations of the port.
 
-See ``docs/state-machine.md`` for the design and ``docs/plan-delta.md`` for how
-this relates to the original plan and to what vLLM main actually provides.
+See ``docs/state-machine.md`` for the design and ``docs/source-map-vllm-main.md``
+for what vLLM main actually provides, with a ``file:LINE`` anchor per claim.
 """
 
 from .errors import (

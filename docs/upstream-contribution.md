@@ -13,9 +13,8 @@ seen it.
 
 ## 1. The policy, restated
 
-`PROJECT.md` (section *"Upstream contribution (item 11)"*) commits to nothing in
-advance. It sets a priority order and says a documented negative result is an
-acceptable outcome:
+This project commits to nothing in advance about what to file. It sets a
+priority order and treats a documented negative result as an acceptable outcome:
 
 1. an end-to-end weight-update / cache-coherence regression test;
 2. a real bug found during integration;
@@ -33,12 +32,12 @@ What the integration actually surfaced, by that order:
 | 6 | `cache_salt` covers only the prefix-KV block hash | **Partly new as a mechanism note; already covered as a defect.** The prefix cache *is* keyed by `cache_salt`; the other caches are separate and unkeyed by it. §3.2 |
 | 7 | No lease / recovery protocol for a managed engine | **New, and a design discussion rather than a patch.** §3.5 |
 | 8 | KV cache is sized with no headroom for the weight-transfer receive buffers | **New.** Measured OOM. §3.6 |
-| 9 | The engine's `weight_version` is not evidence of which weights produced a response | **Known design question** (RFC #48306 §2.2; maintainer thread in `research/comments_48306.md`). §1.1 supplies a measured data point |
+| 9 | The engine's `weight_version` is not evidence of which weights produced a response | **Known design question** (RFC #48306 §2.2; see the maintainer thread on that RFC). §1.1 supplies a measured data point |
 
 ### 1.1 The one measured contribution to the version-span discussion
 
-RFC #48306 §2.2 is where per-request version binding was removed, recorded in
-`research/comments_48306.md`: #49040 *"implemented the query/update APIs, but
+RFC #48306 §2.2 is where per-request version binding was removed. In the
+thread on that RFC, #49040 *"implemented the query/update APIs, but
 intentionally removed binding a version to `Request`/`RequestOutput` after review
 noted that one request may span multiple weight versions."* The same thread asks
 which contract a follow-up should implement.
@@ -152,8 +151,8 @@ BOTH: tests/entrypoints/openai/test_openai_schema.py    # schema strings, not a 
 #48312's own warning that *"HTTP success alone is not a correctness oracle"*: it
 asserts a version string advanced while nothing asserts a weight changed.
 
-**The RFC asks for exactly this.** From `research/rfc_48312.json` (RFC #48312,
-state `open`), category 7's minimum regression check is:
+**The RFC asks for exactly this.** RFC #48312 (state: open), category 7's
+minimum regression check is:
 
 > warm cache on A → update to B → reuse the same request → assert the cache path
 > is exercised and the result matches cold-cache B
@@ -331,7 +330,7 @@ statement is that it invalidates *only* LoRA state, and no KV/encoder/MM cache.
 
 **Known upstream.** RFC #48312 exit criterion 7 requires
 *"#48762 or an equivalent non-reverted fix"*; #48762 was closed unmerged (recorded
-in `source-map-vllm-main.md`, which cites GitHub state `closed`,
+in `docs/source-map-vllm-main.md`, which cites GitHub state `closed`,
 `merged_at: null`). The *reason* for closing is not in this checkout.
 
 **Verdict: report, as a question first.** Re-proposing the same patch without
@@ -621,8 +620,8 @@ plus the documentation inconsistency around it.
   backticked `file.py:LINE` and fails on any that does not resolve.
 * **Two claims are second-hand, not verified here.** The GitHub state of #48762
   (closed, unmerged) and of #49040 (merged) cannot be checked from a checkout;
-  both are taken from this repo's own records (`source-map-vllm-main.md`,
-  `research/comments_48306.md`). The *code* consequences are verified: the caches
+  both are taken from this repo's own records (`docs/source-map-vllm-main.md`
+  and the RFC threads it cites). The *code* consequences are verified: the caches
   are not invalidated by an update, and no per-request version field exists.
 * **Two inherited phrasings were corrected, not dropped.** `reset_lora_state()`
   means "invalidates nothing" should read "invalidates only LoRA state" (§3.1);

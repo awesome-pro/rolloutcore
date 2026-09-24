@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Invariant tests.
 
-Each test names the invariant it defends. I1-I6 come from the original project
-plan (``old-plan.md`` section 21); I7-I10 come from the implementation
-amendments. The mapping from invariant to enforcing code is in
-``docs/state-machine.md``.
+Each test names the invariant it defends. I1-I6 come from the design in
+``docs/state-machine.md``; I7-I10 come from the implementation amendments. That
+document also carries the mapping from invariant to enforcing code.
 """
 
 from __future__ import annotations
