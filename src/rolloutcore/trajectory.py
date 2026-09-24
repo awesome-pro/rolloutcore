@@ -90,6 +90,11 @@ class Trajectory:
     prompt: str
     text: str
     token_ids: tuple[int, ...] = ()
+    #: Chosen-token logprobs, one per generated token and in the same order as
+    #: :attr:`token_ids`. Empty when the engine was not asked for them -- which is
+    #: the difference between a replay that can compare distributions and one that
+    #: can only compare tokens (:mod:`rolloutcore.replay`).
+    logprobs: tuple[float, ...] = ()
     finish_reason: str | None = None
     seconds: float | None = None
     #: What the engine reported when the rollout was admitted. ``None`` when the
@@ -109,6 +114,17 @@ class Trajectory:
             not isinstance(t, int) or isinstance(t, bool) for t in self.token_ids
         ):
             raise TrajectoryError("trajectory token_ids must be a tuple of ints")
+        # `bool` is an `int` subclass, and a `True` logprob would sail through every
+        # arithmetic comparison the replay validator makes, so it is rejected here.
+        if not isinstance(self.logprobs, tuple) or any(
+            not isinstance(lp, (int, float)) or isinstance(lp, bool) for lp in self.logprobs
+        ):
+            raise TrajectoryError("trajectory logprobs must be a tuple of real numbers")
+        if self.logprobs and len(self.logprobs) != len(self.token_ids):
+            raise TrajectoryError(
+                f"trajectory logprobs must be empty or one per generated token: got "
+                f"{len(self.logprobs)} for {len(self.token_ids)} token_ids"
+            )
         if self.seconds is not None and self.seconds < 0:
             raise TrajectoryError("trajectory seconds must be >= 0")
 
@@ -185,6 +201,7 @@ class Trajectory:
             "prompt": self.prompt,
             "text": self.text,
             "token_ids": list(self.token_ids),
+            "logprobs": list(self.logprobs),
             "finish_reason": self.finish_reason,
             "seconds": self.seconds,
             "engine_version_at_admission": self.engine_version_at_admission,
@@ -205,6 +222,9 @@ class Trajectory:
             prompt=str(data["prompt"]),
             text=str(data["text"]),
             token_ids=tuple(int(t) for t in data.get("token_ids", ())),
+            # Defaults to empty, so the Phase 5 artifact -- written before logprobs
+            # existed -- still loads and still round-trips unchanged.
+            logprobs=tuple(float(lp) for lp in data.get("logprobs", ())),
             finish_reason=data.get("finish_reason"),
             seconds=data.get("seconds"),
             engine_version_at_admission=data.get("engine_version_at_admission"),

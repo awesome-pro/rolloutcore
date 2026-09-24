@@ -30,6 +30,8 @@ from rolloutcore import (
     WeightVersion,
 )
 
+REPO = Path(__file__).resolve().parent.parent
+
 STEP0 = WeightProvenance(checkpoint="facebook/opt-125m", run_id="run-7", step=0)
 STEP1 = WeightProvenance(checkpoint="facebook/opt-125m", run_id="run-7", step=1)
 
@@ -138,6 +140,53 @@ class TestValidation:
     def test_negative_seconds_are_rejected(self):
         with pytest.raises(TrajectoryError, match="seconds"):
             trajectory(seconds=-1.0)
+
+
+class TestLogprobs:
+    """The field the replay validator reads (item 8).
+
+    Its shape is an invariant, not a convention: ``ReplayPlan`` compares position
+    *i* of the record against position *i* of the replay, so a short logprob tuple
+    would silently shift every later comparison.
+    """
+
+    def test_logprobs_must_be_one_per_generated_token(self):
+        trajectory(token_ids=(1, 2), logprobs=(-0.1, -0.2))
+        with pytest.raises(TrajectoryError, match="one per generated token"):
+            trajectory(token_ids=(1, 2), logprobs=(-0.1,))
+        with pytest.raises(TrajectoryError, match="one per generated token"):
+            trajectory(token_ids=(1, 2), logprobs=(-0.1, -0.2, -0.3))
+
+    def test_logprobs_may_be_absent(self):
+        assert trajectory(token_ids=(1, 2)).logprobs == ()
+
+    def test_logprobs_must_be_real_numbers(self):
+        with pytest.raises(TrajectoryError, match="real numbers"):
+            trajectory(token_ids=(1,), logprobs=("low",))
+        with pytest.raises(TrajectoryError, match="real numbers"):
+            trajectory(token_ids=(1, 2), logprobs=(-0.1, None))
+
+    def test_a_bool_is_not_a_logprob(self):
+        """`bool` is an `int`; `True` would pass every arithmetic comparison."""
+        with pytest.raises(TrajectoryError, match="real numbers"):
+            trajectory(token_ids=(1,), logprobs=(True,))
+
+    def test_logprobs_survive_a_round_trip(self):
+        original = trajectory(token_ids=(1, 2), logprobs=(-0.25, -1.75))
+        restored = Trajectory.from_json(json.loads(json.dumps(original.to_json())))
+        assert restored == original
+        assert restored.logprobs == (-0.25, -1.75)
+
+    def test_the_phase5_artifact_still_loads_and_round_trips(self):
+        """It predates the field, so `from_json` must default it to empty -- and the
+        round trip must be unchanged, or replaying a committed record would shift."""
+        path = REPO / "results" / "phase5-trajectories.jsonl"
+        records = TrajectoryRecorder.read_jsonl(path)
+        assert len(records) == 2
+        assert all(record.logprobs == () for record in records)
+        assert all(record.replay_ready for record in records)
+        for record in records:
+            assert Trajectory.from_json(record.to_json()) == record
 
 
 class TestCodec:

@@ -12,6 +12,10 @@ Then it demonstrates the failure properties the design is built around: a
 failed update is never published, a taint preserves the in-flight rollout
 bindings for forensics, and a bootstrap that refuses an already-managed engine
 does so before writing anything.
+
+It ends with the record layer: a trajectory is replayed against itself, a
+logprob drift the token lane cannot see is caught, a replay on the wrong version
+is refused as a comparison, and a manifest-only record cannot be planned at all.
 """
 
 from __future__ import annotations
@@ -20,7 +24,10 @@ import sys
 
 from .adapters import FakeVLLMAdapter, FakeVLLMEngine, manifest_identity
 from .lifecycle import LifecycleController, LifecycleState, RolloutBinding
+from .replay import ReplayError, ReplayObservation, ReplayPlan, validate_replay
 from .runner import LifecycleRunner
+from .trajectory import Trajectory
+from .versions import ParamSpec, WeightIdentity, WeightProvenance, WeightVersion
 
 W = 78
 
@@ -241,6 +248,113 @@ def refused_bootstrap_path() -> None:
     print("\n  OK: refused without side effects, then adopted cleanly.")
 
 
+def replay_path() -> None:
+    rule("6. Replay: did the declared weight source reproduce its own tokens?")
+
+    identity = WeightIdentity.from_param_specs(
+        [ParamSpec("decoder.embed_tokens.weight", "f16", (2, 2))],
+        source=WeightProvenance(checkpoint="facebook/opt-125m", run_id="demo", step=1),
+    )
+    record = Trajectory(
+        binding=RolloutBinding(
+            request_id="R1",
+            version=WeightVersion.parse_label("rc-1"),
+            weight_identity=identity,
+            cache_salt="rc-1",
+            admitted_seq=0,
+        ),
+        prompt="The capital of France is",
+        text=" the capital of France is Paris.",
+        token_ids=(5, 812, 9, 5, 1470),
+        logprobs=(-0.12, -0.44, -0.51, -0.62, -0.30),
+        engine_version_at_admission="rc-1",
+        engine_version_at_completion="rc-1",
+    )
+    plan = ReplayPlan.from_trajectory(record)
+    print(f"  record            : {record.describe()}")
+    print(f"  plan              : {plan.describe()}")
+
+    same = validate_replay(
+        plan,
+        ReplayObservation(
+            request_id="R1",
+            version="rc-1",
+            token_ids=record.token_ids,
+            logprobs=record.logprobs,
+        ),
+    )
+    print(f"  same weights      : {same.describe()}")
+
+    # Tokens identical, one logprob shifted: the token lane cannot see this, and
+    # that is the whole reason the logprob lane exists.
+    drifted = validate_replay(
+        plan,
+        ReplayObservation(
+            request_id="R1",
+            version="rc-1",
+            token_ids=record.token_ids,
+            logprobs=(-0.12, -0.44, -0.51, -0.62, -1.90),
+        ),
+    )
+    print(f"  drifted logprobs  : {drifted.describe()}")
+    for note in drifted.notes:
+        print(f"    note: {note}")
+
+    other = validate_replay(
+        plan,
+        ReplayObservation(
+            request_id="R1",
+            version="rc-0",
+            token_ids=record.token_ids,
+            logprobs=record.logprobs,
+        ),
+    )
+    print(f"  wrong version     : {other.describe()}")
+    for violation in other.protocol:
+        print(f"    protocol: {violation}")
+
+    forced = validate_replay(
+        plan,
+        ReplayObservation(
+            request_id="R1",
+            version="rc-1",
+            token_ids=record.token_ids,
+            logprobs=record.logprobs,
+            tokens_were_forced=True,
+        ),
+    )
+    print(f"  trace-forced echo : {forced.describe()}")
+
+    # The record a trajectory must not be built from: the manifest-only identity
+    # cannot name a training step, so there is nothing a replay could be
+    # attributed to.
+    manifest_only = Trajectory(
+        binding=RolloutBinding(
+            request_id="R2",
+            version=WeightVersion.parse_label("rc-1"),
+            weight_identity=manifest_identity("B"),
+            cache_salt="rc-1",
+            admitted_seq=1,
+        ),
+        prompt="The capital of France is",
+        text=" Paris.",
+        token_ids=(5, 1470),
+    )
+    try:
+        ReplayPlan.from_trajectory(manifest_only)
+    except ReplayError as exc:
+        print(f"  manifest-only     : refused — {exc}")
+    else:  # pragma: no cover - the refusal is the point
+        raise AssertionError("a manifest-only record must not be replayable")
+
+    assert same.agrees and same.logprob_lane == "compared"
+    assert not drifted.agrees and drifted.token_mismatches == 0 and drifted.worst_index == 4
+    assert not other.agrees and other.protocol
+    assert forced.agrees
+    print("\n  OK: agreement, a drift only the logprobs can see, a version")
+    print("     mismatch, and a refusal to replay an unidentified record.")
+
+
 def main() -> int:
     print("=" * W)
     print("RolloutCore — lifecycle demo (fake engine, no GPU)".center(W))
@@ -250,6 +364,7 @@ def main() -> int:
     finalize_failure_path()
     cache_invalidation_failure_path()
     refused_bootstrap_path()
+    replay_path()
     rule()
     print("All assertions held.")
     return 0

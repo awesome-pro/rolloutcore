@@ -13,3 +13,6 @@ build/
 results/*
 !results/*.json
 !results/*.md
+# Phase 5's trajectory records and the synthetic replay file the validator's
+# documented command reads: small, hand-checkable, and the input to item 8.
+!results/*.jsonl

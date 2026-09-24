@@ -51,6 +51,13 @@ from .lifecycle import (
     enumerate_transition_matrix,
 )
 from .port import LifecycleAdapter
+from .replay import (
+    ReplayError,
+    ReplayObservation,
+    ReplayPlan,
+    ReplayVerdict,
+    validate_replay,
+)
 from .runner import CycleResult, LifecycleRunner
 from .trajectory import Trajectory, TrajectoryError, TrajectoryRecorder
 from .versions import (
@@ -104,6 +111,10 @@ __all__ = [
     "NotServingError",
     "OrphanedRollout",
     "ParamSpec",
+    "ReplayError",
+    "ReplayObservation",
+    "ReplayPlan",
+    "ReplayVerdict",
     "ResumeEvidence",
     "RolloutBinding",
     "RolloutCoreError",
@@ -127,4 +138,5 @@ __all__ = [
     "WeightTransferReport",
     "WeightVersion",
     "enumerate_transition_matrix",
+    "validate_replay",
 ]
