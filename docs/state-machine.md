@@ -290,6 +290,38 @@ Hence `InvalidateEvidence` demands all three resets and taints if any is
 missing. A design relying on `cache_salt` alone would be silently wrong for any
 multimodal or LoRA workload — the failure class RFC #48312 category 7 tracks.
 
+### The invalidation boundary (amendment 7)
+
+**The drain does not clear caches, and neither does the update. `INVALIDATING`
+is the only place a cycle drops them.** The pause is issued as
+`POST /pause?mode=wait&clear_cache=false` (`src/rolloutcore/adapters/http.py`),
+and the fake adapter mirrors it.
+
+The reason is not symmetry. The pause happens **before** the mutation, so a clear
+there discards KV that is still valid at that instant and, worse, hides a broken
+`INVALIDATING`: with `clear_cache=true` every cycle would still come out clean,
+and Phase 4C's guarantee could not tell the two clears apart. After the change
+the order is
+
+```
+pause(clear_cache=false) → update → INVALIDATING (all three) → validate → resume
+```
+
+and every later step runs while the engine is still paused, so there is no window
+in which a request can be served from a cache the mutation invalidated.
+
+What pins this is Phase 4C's two lanes (`results/phase4c.json`): with
+`clear_cache=false` and **no** reset, the engine handed back 32 prefix-cache hits
+computed under the previous weights and the tokens differed; with the reset, the
+same prompt scored 0 hits. The Phase 1 run of that harness predates this
+amendment and its pause also cleared, which is precisely why the boundary is now
+singular: the run can no longer be read as evidence about `INVALIDATING` alone,
+and the next run of it can.
+
+`tests/test_cycle.py::test_invalidating_is_the_only_place_caches_are_dropped`
+pins the whole sequence: caches dirtied before the drain stay dirty through the
+pause, the update and validation, and only the `/reset_*` triple empties them.
+
 ---
 
 ## 7. Control plane vs. data plane
@@ -342,7 +374,7 @@ interface is `rolloutcore.port.LifecycleAdapter`:
 | Method | vLLM operation group |
 |---|---|
 | `bootstrap()` | refuse if managed → driver `initialize()` (which posts `/init_weight_transfer_engine`) → `/update_weight_version` `rc-0` → `/weight_info` + `/get_world_size` |
-| `begin_drain()` | `POST /pause?mode=wait&clear_cache=true` (non-blocking) |
+| `begin_drain()` | `POST /pause?mode=wait&clear_cache=false` (non-blocking) |
 | `await_drain()` | polls the attempt state; **never blocks**; abort + reissue on failure |
 | `start_weight_update(target)` | validates a driver exists; the driver posts `POST /start_weight_update` from inside `transfer` |
 | `complete_weight_update(target)` | `driver.transfer(target)` → `/start_weight_update` + `/update_weights` ×N + `/finish_weight_update`, interleaved with the collective |
@@ -408,7 +440,7 @@ behaviours the design depends on, each traced to its vLLM source.
 |---|---|---|
 | `weight_version` starts as the literal `"default"` and is never auto-incremented | bootstrap must seed `rc-0` | `core.py:137`, `:1043` |
 | `pause(mode="wait")` sets `PAUSED_NEW` **first**, then reports "not complete" while requests are active | a still-running drain is `EvidenceNotReady`, and the engine is already blocking new work | `core.py:2017-2018` |
-| `pause(clear_cache=True)` cleans all three caches | INVALIDATING is a re-assertion, not the only defence | `core.py:877-882` → `:861-875` |
+| `pause(clear_cache=False)` leaves all three caches populated | which is why the drain must not be trusted to clear: INVALIDATING is the boundary | `core.py:877-882` → `:861-875` |
 | `finish_weight_update` writes the version but invalidates **no cache** | the engine label is not a commit marker | `async_llm.py:1284-1288`; `gpu_worker.py:1488-1505` |
 | `finish_weight_update` failure leaves the label unwritten | the label is written only *after* the RPC returns | `async_llm.py:1284-1288` |
 | `reset_prefix_cache` can return `false` while blocks are held | a 200 is not success | `block_pool.py:831-838` |

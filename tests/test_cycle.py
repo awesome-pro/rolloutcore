@@ -189,28 +189,41 @@ class TestFullCycle(unittest.TestCase):
         self.assertFalse(engine.paused)
         self.assertIs(ctrl.state, LifecycleState.READY)
 
-    def test_caches_are_clean_before_the_engine_is_resumed(self):
+    def test_invalidating_is_the_only_place_caches_are_dropped(self):
+        """The drain must not clear, and the update must not either.
+
+        If the pause cleared (the old design) a broken INVALIDATING would be
+        invisible: every cycle would still come out clean. Here the caches are
+        dirtied *before* the drain, and every step between must leave them dirty
+        -- the pause (`clear_cache=false`), the weight update (whose only
+        worker-side cleanup is `reset_lora_state()`,
+        `vllm/v1/worker/gpu_worker.py:1504-1505`), and validation. Only
+        INVALIDATING drops them, and it runs while the engine is still paused, so
+        a cache that survived it would be served under the new weights -- the
+        Phase 4C hazard (`results/phase4c.json`).
+        """
         engine = seeded_engine(IDENTITY_V0)
         runner, ctrl, adapter = make_runner(engine)
         runner.bootstrap()
+
+        # KV from the old version: the state the boundary exists to remove.
+        engine.encoder_cache_dirty = True
+        engine.mm_cache_dirty = True
+        engine.prefix_cache_dirty = True
 
         target = ctrl.next_target(manifest_identity("v1"))
         ctrl.begin_drain()
         adapter.begin_drain()
         ctrl.confirm_drained(adapter.await_drain())
+        self.assertTrue(engine.prefix_cache_dirty, "the drain must not clear caches")
+
         ctrl.begin_update(target)
         adapter.start_weight_update(target)
         ctrl.confirm_updated(adapter.complete_weight_update(target))
-
-        # pause(mode="wait", clear_cache=True) already cleaned all three as a
-        # side effect (vllm/v1/engine/core.py:877-882 -> :861-875). Re-dirty them
-        # to model a cache that pause does not know about, then show that
-        # finish_weight_update leaves it dirty -- exactly like vLLM, which only
-        # calls reset_lora_state() (vllm/v1/worker/gpu_worker.py:1504-1505).
-        engine.encoder_cache_dirty = True
-        engine.mm_cache_dirty = True
-        engine.prefix_cache_dirty = True
+        self.assertTrue(engine.prefix_cache_dirty, "the update must not clear caches")
         self.assertTrue(engine.encoder_cache_dirty)
+        self.assertTrue(engine.mm_cache_dirty)
+        self.assertTrue(engine.is_paused(), "the boundary runs while still paused")
 
         ctrl.confirm_invalidated(adapter.invalidate_caches(target))
         self.assertFalse(engine.encoder_cache_dirty)

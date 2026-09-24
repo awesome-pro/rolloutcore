@@ -111,7 +111,7 @@ class BootstrapEvidence(Evidence):
 
 @dataclass(frozen=True, slots=True)
 class DrainEvidence(Evidence):
-    """The engine's response to ``POST /pause?mode=wait&clear_cache=true``.
+    """The engine's response to ``POST /pause?mode=wait&clear_cache=false``.
 
     Two distinct outcomes, deliberately separated:
 
@@ -204,16 +204,14 @@ class UpdateEvidence(Evidence):
 class InvalidateEvidence(Evidence):
     """Proof that every cache holding previous-generation content is dropped.
 
-    All three flags are required. This is deliberately stricter than the
-    ``clear_cache=true`` pause flag, because:
-
-    * ``POST /pause?mode=wait&clear_cache=true`` already resets all three caches
-      as a side effect (``vllm/v1/engine/core.py:877-882`` -> ``:861-875``), so
-      re-asserting them here is cheap;
-    * the ``clear_cache`` flag's documented semantics contradict the code
-      (``dev/rlhf/api_router.py:46-47`` claims it is ignored for ``keep``, while
-      ``core.py:2017-2021`` honours it), so relying on it implicitly is fragile;
-    * it is the natural place to add a cache that pause does not know about.
+    All three flags are required, and this is the **only** place a cycle drops
+    caches. The drain deliberately pauses with ``clear_cache=false``: a clear
+    before the mutation is not a correctness boundary -- it discards KV that is
+    still valid at that instant -- and it would hide a failure here. The order
+    (pause, mutate, invalidate, validate, resume) means nothing can be served
+    between the mutation and this evidence, while the engine is still paused, so
+    a cache that survives it is exactly the hazard Phase 4C measured: 32
+    prefix-cache hits served across a weight change, producing different tokens.
 
     ``prefix_cache_reset`` comes from ``POST /reset_prefix_cache`` returning
     ``{"success": true}`` (``dev/cache/api_router.py:44``). Note the naming trap:
@@ -223,7 +221,8 @@ class InvalidateEvidence(Evidence):
     ``encoder_cache_reset`` and ``mm_cache_reset`` are **not** optional and are
     **not** covered by ``cache_salt``, which only reaches the prefix-cache block
     hash (``vllm/v1/core/kv_cache_utils.py:632-634``). This is the cache that
-    ``finish_weight_update`` forgets: PR #48762 ("Invalidate encoder cache on
+    ``finish_weight_update`` forgets: its only worker-side cleanup is
+    ``reset_lora_state()`` and PR #48762 ("Invalidate encoder cache on
     finish_weight_update") was closed unmerged.
     """
 

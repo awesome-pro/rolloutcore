@@ -187,9 +187,13 @@ class FakeVLLMAdapter:
     # --------------------------------------------------------------- helpers
 
     def _try_pause(self) -> bool:
-        """Attempt ``pause(mode="wait")``; return whether it completed."""
+        """Attempt ``pause(mode="wait")``; return whether it completed.
+
+        ``clear_cache=False`` mirrors :class:`HttpVLLMAdapter`: the drain does
+        not clear, because the clear belongs after the mutation (INVALIDATING).
+        """
         try:
-            self.engine.pause(mode="wait", clear_cache=True)
+            self.engine.pause(mode="wait", clear_cache=False)
         except FakeEngineError:
             return False
         self._drain_completed = True

@@ -20,13 +20,21 @@ mean a trajectory whose output came from two different weight sets. A second
 request then has to score hits again, or "no reuse" would be indistinguishable
 from "caching silently turned off".
 
+The cycle's drain now pauses with ``clear_cache=false`` (amendment 7,
+``docs/state-machine.md`` "The invalidation boundary"), so Phase 1 attributes the
+zero to ``INVALIDATING`` alone. The artifact committed as
+``results/phase4c.json`` was produced before that amendment, when the pause also
+cleared; Phase 2 is unaffected either way, because it drives the update out of
+band and clears nothing.
+
 **Phase 2 -- the hazard, and it is recorded rather than asserted.** The trainer's
 first decoder layer is negated in place, and the update is driven *out of band*:
 `/pause?mode=wait&clear_cache=false`, broadcast, `/resume`. No controller, no
 reset. If the cache is still handed back afterwards, then RolloutCore's reset step
-is load-bearing rather than belt-and-braces -- and the fact that the negated
-weights keep the *same* manifest digest is the manifest-only blind spot that item
-5 exists to fix, measured rather than argued.
+is load-bearing -- and it is: 32 hits came back, computed under the previous
+weights, with different tokens. The fact that the negated weights keep the *same*
+manifest digest is the manifest-only blind spot that item 5 exists to fix,
+measured rather than argued.
 
 Server: `--load-format dummy` so rc-0 is visibly degenerate.
 

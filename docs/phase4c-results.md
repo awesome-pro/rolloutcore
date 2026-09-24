@@ -23,6 +23,14 @@ engine APIs (`llm_engine.py:361`, `async_llm.py:1089`, `core_client.py:398`) —
 never by the weight-update path. So the reset is the caller's job, and this phase
 is where that job is either discharged or shown to be theatre.
 
+**One amendment postdates this run.** The cycle now pauses with
+`clear_cache=false`, so `INVALIDATING` is the only place caches are dropped
+(`docs/state-machine.md`, "The invalidation boundary"). The run below was made
+when the pause also cleared — which is exactly the ambiguity that amendment
+removes: Phase 1's zero-hit result cannot by itself separate the pause's clear
+from the reset's, and Phase 2 is what pins the reset, because it runs with
+`clear_cache=false` and no reset at all.
+
 ---
 
 ## Phase 1 — the guarantee, and it gates

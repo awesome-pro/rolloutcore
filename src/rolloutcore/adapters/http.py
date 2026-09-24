@@ -442,7 +442,14 @@ class HttpVLLMAdapter:
             self._call(
                 "POST",
                 "/pause",
-                query="?mode=wait&clear_cache=true",
+                # clear_cache=false on purpose. The pause happens *before* the
+                # weight mutation, so a clear here is not a correctness boundary:
+                # it discards KV that is still valid at that instant, and it
+                # would mask a broken INVALIDATING -- Phase 4C could not tell the
+                # two clears apart. INVALIDATING runs after the mutation, while
+                # the engine is still paused, and is the only place caches are
+                # dropped ("The invalidation boundary" in docs/state-machine.md).
+                query="?mode=wait&clear_cache=false",
                 timeout=self.drain_timeout,
             )
         except Exception as exc:

@@ -19,12 +19,17 @@ What it proves, in order, against a real server:
     happens before any write.
  4. Greedy generation is deterministic (two identical requests, identical text
     and token ids), and the rollout binding carries the committed identity.
- 5. ``pause(mode=wait)`` does not block the RolloutCore side, and the engine's
-    drain genuinely *waits* for an in-flight streaming request to finish.
+ 5. ``pause(mode=wait, clear_cache=false)`` does not block the RolloutCore side,
+    and the engine's drain genuinely *waits* for an in-flight streaming request
+    to finish.
  6. ``GET /is_paused`` reports ``true``, and the label is still ``rc-0``.
  7. ``/reset_prefix_cache``, ``/reset_encoder_cache`` and ``/reset_mm_cache``
-    all succeed. (The pause's ``clear_cache=true`` already ran; this is the
-    explicit re-assertion the design requires.)
+    all succeed. This is the invalidation boundary, not a re-assertion: the
+    drain deliberately leaves the caches populated, and this step is the only
+    place a cycle drops them (``docs/state-machine.md``, "The invalidation
+    boundary"). The Phase 3A run recorded here predates that amendment and its
+    pause *did* clear, which is why step 7 was originally written as a
+    re-assertion.
  8. ``validate_pre_resume`` sees ``rc-0`` **and** still-paused.
  9. ``/resume`` is acknowledged and ``GET /is_paused`` reports ``false``.
 10. Greedy generation is deterministic again, and matches the pre-pause output

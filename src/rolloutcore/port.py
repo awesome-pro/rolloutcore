@@ -17,7 +17,7 @@ corresponding transition checks:
 ``bootstrap``                 ``POST /init_weight_transfer_engine``,
                               ``POST /update_weight_version``,
                               ``GET /weight_info``, ``GET /get_world_size``
-``begin_drain``               ``POST /pause?mode=wait&clear_cache=true``
+``begin_drain``               ``POST /pause?mode=wait&clear_cache=false``
 ``await_drain``               waits for the above to return
 ``start_weight_update``       ``POST /start_weight_update``
 ``complete_weight_update``    ``POST /update_weights`` xN + ``POST /finish_weight_update``

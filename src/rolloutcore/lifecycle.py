@@ -427,16 +427,19 @@ class LifecycleController:
     def begin_drain(self) -> CyclePlan:
         """READY -> DRAINING. Requests the quiesce.
 
-        Maps to ``POST /pause?mode=wait&clear_cache=true``. ``mode="keep"`` is
-        deliberately unreachable from this API: it freezes requests in place and
-        lets a single response span two weight versions, violating I2.
+        Maps to ``POST /pause?mode=wait&clear_cache=false``. The drain does not
+        clear caches: it happens before the mutation, so its clear is not a
+        correctness boundary and would mask a broken ``INVALIDATING`` (see
+        "The invalidation boundary" in ``docs/state-machine.md``). ``mode="keep"``
+        is deliberately unreachable from this API: it freezes requests in place
+        and lets a single response span two weight versions, violating I2.
         """
         self._require_legal(Event.BEGIN_DRAIN)
         self._advance(Event.BEGIN_DRAIN)
         assert self._current_target is not None
         return CyclePlan(
             target=self._current_target,
-            steps=("POST /pause?mode=wait&clear_cache=true",),
+            steps=("POST /pause?mode=wait&clear_cache=false",),
             tags=("pause", "drain"),
         )
 
